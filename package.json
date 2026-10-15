@@ -1,0 +1,34 @@
+{
+  "name": "mana-table",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:rules": "firebase emulators:exec --only database --project mana-table-demo \"pnpm test:rules:unit\"",
+    "test:rules:unit": "vitest run src/services/firebaseRules.test.ts",
+    "test:e2e": "playwright test",
+    "emulator": "firebase emulators:start --only database --project mana-table-demo"
+  },
+  "dependencies": {
+    "firebase": "^13.0.0",
+    "idb": "^8.0.4",
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "@playwright/test": "1.64.1",
+    "@types/node": "^26.6.5",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "firebase-tools": "^15.33.0",
+    "typescript": "5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "5.0.4",
+    "vue-tsc": "3.2.5"
+  }
+}
