@@ -91,6 +91,7 @@ test('cancel preserves name and deck, changes persist, and demo returns to games
   await page.getByRole('button', { name: /Alterar nome/ }).click();
   await page.getByLabel('Seu nome', { exact: true }).fill('Ana');
   await page.getByRole('button', { name: 'Continuar', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
   await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
