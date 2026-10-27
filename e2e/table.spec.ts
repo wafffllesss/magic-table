@@ -26,8 +26,13 @@ test('shows five recent events and opens every retained log entry in an accessib
   await startLocalDemo(page);
   const preview = page.locator('.action-log-preview');
   await expect(preview.locator('.action-log-preview-entry')).toHaveCount(1);
-  const increaseLife = page.locator('.seat-life-panel button').nth(1);
-  for (let index = 0; index < 6; index++) await increaseLife.click({ force: true });
+  const increaseLife = page.getByRole('button', { name: 'Aumentar vida de Lia', exact: true });
+  const life = page.getByRole('region', { name: 'Vida de Lia', exact: true }).locator('.seat-life-value');
+  for (let index = 0; index < 6; index++) {
+    await expect(increaseLife).toBeEnabled();
+    await increaseLife.click({ force: true });
+    await expect(life).toHaveText(String(41 + index));
+  }
   await expect(preview.locator('.action-log-preview-entry')).toHaveCount(5);
   await preview.locator('.action-log-open').click();
   const dialog = page.getByRole('dialog', { name: 'Histórico de ações' });
