@@ -45,13 +45,11 @@ test('fans use the visible felt and advance cards into edge stacks', async ({ pa
   await page.getByRole('button', { name: 'Fechar inspeção', exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.topbar-actions .icon-button').first().click();
-  const horizontalBounds = await graveyard.evaluate(node => {
+  await expect.poll(() => graveyard.evaluate(node => {
     const fan = node.getBoundingClientRect();
     const stage = node.closest('.table-stage')!.getBoundingClientRect();
-    return { fanLeft: fan.left, fanRight: fan.right, stageLeft: stage.left, stageRight: stage.right };
-  });
-  expect(horizontalBounds.fanLeft).toBeGreaterThanOrEqual(horizontalBounds.stageLeft - 2);
-  expect(horizontalBounds.fanRight).toBeLessThanOrEqual(horizontalBounds.stageRight + 2);
+    return fan.left >= stage.left - 2 && fan.right <= stage.right + 2;
+  })).toBe(true);
   const display = graveyard.locator('.public-zone-fan-display');
   await display.dispatchEvent('pointerdown', { pointerType: 'touch', clientX: 220, clientY: 450 });
   await display.dispatchEvent('pointerup', { pointerType: 'touch', clientX: 150, clientY: 450 });
