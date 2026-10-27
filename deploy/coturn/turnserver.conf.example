@@ -1,0 +1,30 @@
+# Copy to turnserver.conf and keep that file private (chmod 600).
+# Replace TURN_HOST and TURN_SHARED_SECRET before starting coturn.
+realm=TURN_HOST
+server-name=TURN_HOST
+listening-port=3478
+tls-listening-port=5349
+min-port=49152
+max-port=50175
+fingerprint
+lt-cred-mech
+use-auth-secret
+static-auth-secret=TURN_SHARED_SECRET
+user-quota=32
+total-quota=256
+# Bytes per second, per session, per direction. Adjust after measuring real rooms.
+max-bps=1048576
+# Aggregate bytes per second, per direction.
+bps-capacity=67108864
+no-multicast-peers
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+simple-log
+log-file=stdout

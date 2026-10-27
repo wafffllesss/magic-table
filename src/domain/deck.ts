@@ -71,7 +71,9 @@ export function areValidPartners([first, second]: CardDefinition[]): boolean {
   const secondWords = `${second.keywords.join(' ')} ${second.oracle_text}`.toLowerCase();
   const identity = new Set([...first.color_identity, ...second.color_identity]);
   if (firstWords.includes('partner') && secondWords.includes('partner')) {
-    const a = firstWords.match(/partner with ([^.\n]+)/i)?.[1]; const b = secondWords.match(/partner with ([^.\n]+)/i)?.[1];
+    // Keyword names also contain "Partner with"; extract the actual partner only from rules text.
+    const a = first.oracle_text.match(/partner with ([^(\n]+)/i)?.[1].trim().replace(/\.$/, '');
+    const b = second.oracle_text.match(/partner with ([^(\n]+)/i)?.[1].trim().replace(/\.$/, '');
     return !(a || b) || Boolean(a && b && normalise(a) === normalise(second.name) && normalise(b) === normalise(first.name));
   }
   const backgroundA = /background/i.test(first.type_line) && first.type_line.includes('Legendary');

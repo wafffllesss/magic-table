@@ -2,68 +2,91 @@ import type { DeckDefinition, DeckEntry } from '../domain/game';
 import { shuffle } from '../domain/game';
 import { parseDeckText, validateDeck } from '../domain/deck';
 import { localRepository } from './storage';
-import { scryfall } from './scryfall';
+import { scryfall, type ScryfallProgress } from './scryfall';
+import { cardNames, normaliseCardName as normalise } from '../domain/cardNames';
+import { LEGACY_STARTER_IDS, PRECONS, type PreconManifest } from './precons';
 
 export type StarterDeckStatus = { decks: DeckDefinition[]; isFresh: boolean; warning?: string };
 
-const STARTER_DECKS = [
-  { id: 'starter-mono-white', name: 'Marcha da Vanguarda', colors: 'w', commanders: ['Adeline, Resplendent Cathar'], basics: ['Plains'] },
-  { id: 'starter-mono-blue', name: 'Cartógrafos do Éter', colors: 'u', commanders: ['Talrand, Sky Summoner'], basics: ['Island'] },
-  { id: 'starter-partner', name: 'Uma Sociedade Inesperada', colors: 'wg', commanders: ['Frodo, Adventurous Hobbit', 'Sam, Loyal Attendant'], basics: ['Forest', 'Plains'] },
-  { id: 'starter-background', name: 'Aventura sem Fronteiras', colors: 'wb', commanders: ["Lae'zel, Vlaakith's Champion", 'Agent of the Iron Throne'], basics: ['Plains', 'Swamp'] },
-] as const;
-
-const STARTER_VERSION = 1;
-
-export async function getStarterDecks(signal?: AbortSignal): Promise<StarterDeckStatus> {
-  const saved = await Promise.all(STARTER_DECKS.map(async starter => {
-    const decks = await localRepository.getDecks();
-    return decks.find(deck => deck.id === starter.id && (deck as DeckDefinition & { starterVersion?: number }).starterVersion === STARTER_VERSION);
-  }));
-  if (saved.every(Boolean)) return { decks: saved as DeckDefinition[], isFresh: false };
-
-  try {
-    const commanders = await scryfall.resolve([...new Set(STARTER_DECKS.flatMap(deck => [...deck.commanders]))], signal);
-    const definitionsByName = new Map(commanders.flatMap(card => [[normalise(card.name), card], ...(card.card_faces ?? []).map(face => [normalise(face.name), card] as const)]));
-    const existingDecks: DeckDefinition[] = [];
-    for (const starter of STARTER_DECKS) {
-      const leaderCards = starter.commanders.map(name => definitionsByName.get(normalise(name)));
-      if (leaderCards.some(card => !card)) throw new Error(`Scryfall não encontrou o comandante de ${starter.name}.`);
-      const requiredColors = [...new Set(starter.colors.split(''))];
-      if (leaderCards.some(card => !card!.color_identity.every(color => requiredColors.includes(color.toLowerCase())))) throw new Error(`A identidade de cores de ${starter.name} mudou. Nenhum deck foi criado.`);
-
-      const query = `f:commander legal:commander id<=${starter.colors} -t:land -is:commander`;
-      const result = await scryfall.search(query, 1, signal).catch(async () => scryfall.search(`f:commander legal:commander id<=${starter.colors} -t:land`, 1, signal));
-      const commanderOracleIds = new Set(leaderCards.map(card => card!.oracle_id));
-      const pool = result.data.filter(card => card.legalities.commander === 'legal' && !commanderOracleIds.has(card.oracle_id) && !/\bBasic Land\b/i.test(card.type_line));
-      const uniquePool = new Map(pool.map(card => [card.oracle_id, card]));
-      const requiredSpellCount = 100 - starter.commanders.length - 35;
-      const spells = shuffle([...uniquePool.values()]).slice(0, requiredSpellCount);
-      if (spells.length < requiredSpellCount) throw new Error(`Scryfall retornou somente ${spells.length} cartas elegíveis para ${starter.name}. Tente novamente com internet.`);
-
-      const entries: DeckEntry[] = leaderCards.map(card => ({ cardId: card!.id, name: card!.name, quantity: 1, role: 'commander', card: card! }));
-      entries.push(...spells.map(card => ({ cardId: card.id, name: card.name, quantity: 1, role: 'library' as const, card })));
-      const basicNames = [...(starter.colors.length === 1 ? [starter.basics[0]] : starter.basics)];
-      const basicDefinitions = await scryfall.resolve(basicNames, signal);
-      if (basicDefinitions.length !== basicNames.length) throw new Error('Não foi possível carregar os terrenos básicos da biblioteca local.');
-      const basicGroups = splitBasics(basicNames, starter.colors);
-      basicDefinitions.forEach((basic, index) => {
-        const quantity = basicGroups[index];
-        if (quantity > 0) entries.push({ cardId: basic.id, name: basic.name, quantity, role: 'library', card: basic });
-      });
-      const deck: DeckDefinition & { starterVersion: number } = { id: starter.id, name: starter.name, format: 'commander', commanders: leaderCards.map(card => card!.id), entries, updatedAt: Date.now(), starterVersion: STARTER_VERSION };
-      const validation = validateDeck(deck, new Map(entries.flatMap(entry => entry.card ? [[entry.cardId, entry.card] as const] : [])));
-      if (validation.length) throw new Error(`${starter.name}: ${validation.join(' ')}`);
-      await localRepository.saveDeck(deck);
-      existingDecks.push(deck);
-    }
-    return { decks: existingDecks, isFresh: true };
-  } catch (error) {
-    const cachedDecks = await localRepository.getDecks();
-    const starterDecks = cachedDecks.filter(deck => STARTER_DECKS.some(starter => starter.id === deck.id));
-    if (starterDecks.length === STARTER_DECKS.length) return { decks: starterDecks, isFresh: false, warning: friendlyError(error) };
-    throw error;
+export async function getLibraryDecks(): Promise<DeckDefinition[]> {
+  const decks = await localRepository.getDecks();
+  for (const id of LEGACY_STARTER_IDS) {
+    if (decks.some(deck => deck.id === id)) await localRepository.deleteDeck(id);
   }
+  return decks.filter(deck => !LEGACY_STARTER_IDS.some(id => id === deck.id)).filter(deck => {
+    const manifest = PRECONS.find(item => item.id === deck.id);
+    return !manifest || matchesPrecon(deck, manifest);
+  });
+}
+
+export async function getStarterDecks(signal?: AbortSignal, onProgress?: ScryfallProgress): Promise<StarterDeckStatus> {
+  checkAbort(signal);
+  const saved = await getLibraryDecks();
+  const ready: DeckDefinition[] = [];
+  let isFresh = false;
+  const totalNames = PRECONS.reduce((sum, item) => sum + new Set(item.entries.map(entry => normalise(entry.name))).size, 0);
+  let loadedNames = 0;
+  onProgress?.(0, totalNames);
+  for (const manifest of PRECONS) {
+    checkAbort(signal);
+    const cached = saved.find(deck => matchesPrecon(deck, manifest));
+    const manifestNames = new Set(manifest.entries.map(entry => normalise(entry.name)));
+    if (cached) { ready.push(cached); loadedNames += manifestNames.size; onProgress?.(loadedNames, totalNames); continue; }
+    try {
+      const cards = await scryfall.resolve(manifest.entries.map(entry => entry.name), signal, {}, loaded => onProgress?.(loadedNames + loaded, totalNames));
+      checkAbort(signal);
+      const byName = new Map(cards.flatMap(card => cardNames(card).map(name => [name, card] as const)));
+      const missing = manifest.entries.filter(entry => !byName.has(normalise(entry.name)));
+      if (missing.length) throw new Error('Cartas não encontradas: ' + missing.map(entry => entry.name).join(', ') + '.');
+      const entries: DeckEntry[] = manifest.entries.map(entry => {
+        const card = byName.get(normalise(entry.name))!;
+        return { ...entry, cardId: card.id, name: card.name, card };
+      });
+      const deck: DeckDefinition = { id: manifest.id, name: manifest.name, format: 'commander', entries,
+        commanders: entries.filter(entry => entry.role === 'commander').map(entry => entry.cardId),
+        updatedAt: Date.now(), source: manifest.sourceUrl,
+        precon: { setCode: manifest.setCode, edition: manifest.edition, sourceUrl: manifest.sourceUrl, version: manifest.version } };
+      const problems = validateDeck(deck, new Map(entries.map(entry => [entry.cardId, entry.card!])));
+      for (const entry of entries) {
+        if (!entry.card!.legalities.commander) problems.push(`Legalidade de Commander indisponível para ${entry.name}.`);
+      }
+      const identity = entries.filter(entry => entry.role === 'commander').flatMap(entry => entry.card!.color_identity);
+      if ([...new Set(identity)].sort().join('') !== [...manifest.colors].sort().join('')) problems.push('A identidade de cores difere do precon original.');
+      if (problems.length) throw new Error(problems.join(' '));
+      checkAbort(signal);
+      await localRepository.saveDeck(deck);
+      ready.push(deck); isFresh = true;
+      loadedNames += manifestNames.size;
+      onProgress?.(loadedNames, totalNames);
+    } catch (error) {
+      checkAbort(signal);
+      const warning = manifest.name + ': ' + friendlyError(error);
+      const available = PRECONS.flatMap(item => {
+        const deck = ready.find(deck => deck.id === item.id) ?? saved.find(deck => matchesPrecon(deck, item));
+        return deck ? [deck] : [];
+      });
+      if (available.length) return { decks: available, isFresh, warning: warning + ' ' + available.length + ' de ' + PRECONS.length + ' precons disponíveis. Tente carregar novamente.' };
+      throw new Error(warning, { cause: error });
+    }
+  }
+  return { decks: ready, isFresh };
+}
+
+function matchesPrecon(deck: DeckDefinition, manifest: PreconManifest): boolean {
+  if (deck.id !== manifest.id || deck.precon?.version !== manifest.version || deck.precon.setCode !== manifest.setCode) return false;
+  const signature = (entries: Pick<DeckEntry, 'name' | 'quantity' | 'role'>[]) => entries.map(entry => normalise(entry.name) + '|' + entry.quantity + '|' + entry.role).sort().join('\n');
+  if (signature(deck.entries) !== signature(manifest.entries)) return false;
+  if (deck.entries.some(entry => !entry.card || entry.cardId !== entry.card.id || normalise(entry.name) !== normalise(entry.card.name))) return false;
+  const commanders = deck.entries.filter(entry => entry.role === 'commander').map(entry => entry.cardId);
+  if (commanders.length !== deck.commanders.length || !commanders.every(id => deck.commanders.includes(id))) return false;
+  if (deck.entries.some(entry => entry.card!.legalities.commander !== 'legal')) return false;
+  const identity = new Set(deck.entries.filter(entry => entry.role === 'commander').flatMap(entry => entry.card!.color_identity));
+  if ([...identity].sort().join('') !== [...manifest.colors].sort().join('')) return false;
+  return !validateDeck(deck, new Map(deck.entries.map(entry => [entry.cardId, entry.card!]))).length;
+}
+
+function checkAbort(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Busca cancelada.', 'AbortError');
 }
 
 export function randomCommanderDeck(cards: import('../domain/game').CardDefinition[], name: string, identity: string, count = 99): DeckDefinition {
@@ -79,11 +102,4 @@ export function randomCommanderDeck(cards: import('../domain/game').CardDefiniti
 
 export function importTextDeck(text: string): DeckDefinition { return parseDeckText(text); }
 
-function splitBasics(names: readonly string[], _colors: string): number[] {
-  if (names.length === 1) return [35];
-  const first = Math.ceil(35 / names.length);
-  return names.map((_, index) => index === names.length - 1 ? 35 - first * index : first);
-}
-
-function normalise(name: string): string { return name.trim().toLocaleLowerCase('en-US'); }
 function friendlyError(error: unknown): string { return error instanceof Error ? error.message : 'A biblioteca local não pôde ser atualizada.'; }

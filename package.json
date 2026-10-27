@@ -1,34 +1,54 @@
 {
-  "name": "mana-table",
+  "name": "meu-magic",
+  "productName": "Meu Magic",
   "private": true,
   "type": "module",
-  "version": "0.0.0",
+  "version": "0.0.2",
+  "author": "Meu Magic",
+  "description": "Mesa virtual para partidas casuais de Magic: The Gathering.",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "desktop:dev": "node node_modules/electron/install.js && node scripts/build-electron-mcp.cjs && node electron/dev.cjs",
+    "desktop:start": "node node_modules/electron/install.js && node scripts/build-electron-mcp.cjs && electron .",
     "build": "vue-tsc --noEmit && vite build",
+    "desktop:make": "pnpm build && node node_modules/electron/install.js && node scripts/build-electron-mcp.cjs && node scripts/make-desktop.cjs",
     "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:rules": "firebase emulators:exec --only database --project mana-table-demo \"pnpm test:rules:unit\"",
+    "test:rules": "firebase emulators:exec --only database --project demo-magic-table \"pnpm test:rules:unit\"",
     "test:rules:unit": "vitest run src/services/firebaseRules.test.ts",
     "test:e2e": "playwright test",
-    "emulator": "firebase emulators:start --only database --project mana-table-demo"
+    "test:firebase": "node scripts/test-firebase.mjs",
+    "emulator:p2p": "firebase emulators:start --only auth,database --project demo-magic-table",
+    "emulator": "firebase emulators:start --only auth,database --project demo-magic-table",
+    "benchmark:performance": "node scripts/benchmark-performance.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
     "firebase": "^13.0.0",
     "idb": "^8.0.4",
-    "vue": "^3.5.44"
+    "vue": "^3.5.44",
+    "vue-i18n": "^11.4.14",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "5.0.0",
+    "@modelcontextprotocol/client": "^2.3.1",
     "@playwright/test": "1.64.1",
     "@types/node": "^26.6.5",
     "@vitejs/plugin-vue": "^6.0.10",
+    "electron": "^44.7.2",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.5",
     "firebase-tools": "^15.33.0",
     "typescript": "5.9.3",
     "vite": "^8.3.4",
     "vitest": "5.0.4",
     "vue-tsc": "3.2.5"
-  }
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "packageManager": "pnpm@11.22.0"
 }

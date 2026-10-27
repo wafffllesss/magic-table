@@ -39,6 +39,7 @@ build/Release
 
 # Dependency directories
 node_modules/
+functions/lib/
 jspm_packages/
 
 # TypeScript v1 declaration files
@@ -81,6 +82,8 @@ typings/
 # Nuxt.js build / generate output
 .nuxt
 dist
+out
+electron/mcp-server.bundle.cjs
 
 # Gatsby files
 .cache/
@@ -105,8 +108,21 @@ dist
 
 # Local app and test output
 *.local
+deploy/coturn/turnserver.conf
+deploy/coturn/certs/
 .firebase
 test-results
 playwright-report
 .vscode/*
 !.vscode/extensions.json
+
+# Publication: private local configuration and generated test artifacts
+.env.*
+!.env.example
+functions/.env*
+functions/.secret*
+*.pem
+*.key
+test-results*/
+.codex/
+.firebaserc

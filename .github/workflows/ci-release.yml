@@ -1,0 +1,152 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'push' && 'main-release' || format('pr-{0}', github.run_id) }}
+  queue: max
+
+jobs:
+  checks:
+    name: Application checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          version: 11.22.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: node --test scripts/release-version.test.mjs electron/updates.test.cjs
+      - run: pnpm test:rules
+      - run: pnpm test:e2e --workers=1
+      - run: pnpm test:firebase
+      - run: pnpm build
+
+  functions:
+    name: Functions build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: functions
+      - run: npm run build
+        working-directory: functions
+
+  package:
+    name: Package Windows portable
+    if: github.event_name == 'push'
+    needs: [checks, functions]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      complete: ${{ steps.version.outputs.complete }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PUBLICATION_APPROVED: ${{ vars.PUBLICATION_APPROVED }}
+      VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+      VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+      VITE_FIREBASE_DATABASE_URL: ${{ vars.VITE_FIREBASE_DATABASE_URL }}
+      VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+      VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+      VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+      VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          version: 11.22.0
+      - name: Select version
+        id: version
+        run: node scripts/release-version.mjs
+      - name: Check publication prerequisites
+        if: steps.version.outputs.complete != 'true'
+        run: node scripts/release-prerequisites.mjs
+      - name: Install dependencies
+        if: steps.version.outputs.complete != 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Set build version
+        if: steps.version.outputs.complete != 'true'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.RELEASE_VERSION; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
+      - name: Build portable executable
+        if: steps.version.outputs.complete != 'true'
+        run: pnpm desktop:make
+      - name: Generate checksum
+        if: steps.version.outputs.complete != 'true'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $file = "MeuMagic-$env:RELEASE_VERSION-x64.exe"
+          $hash = (Get-FileHash "out/portable/$file" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("out/portable/SHA256SUMS.txt", "$hash  $file`n", [Text.UTF8Encoding]::new($false))
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: steps.version.outputs.complete != 'true'
+        with:
+          name: release-package
+          path: |
+            out/portable/MeuMagic-${{ steps.version.outputs.version }}-x64.exe
+            out/portable/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: github.event_name == 'push' && needs.package.outputs.complete != 'true'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.package.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-package
+          path: release
+      - name: Create or resume draft and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum --check SHA256SUMS.txt)
+          if ! gh release view "$RELEASE_TAG" --json isDraft > release-state.json 2>/dev/null; then
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --draft --generate-notes --title "$RELEASE_TAG"
+          else
+            node -e "const r=require('./release-state.json'); if(!r.isDraft) throw new Error('Existing release is already published')"
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
+          mkdir verify
+          gh release download "$RELEASE_TAG" --dir verify
+          (cd verify && sha256sum --check SHA256SUMS.txt)
+          gh release edit "$RELEASE_TAG" --draft=false

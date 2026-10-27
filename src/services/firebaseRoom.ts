@@ -1,27 +1,33 @@
 import { getApps, initializeApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
-import { indexedDBLocalPersistence, initializeAuth, signInAnonymously, type Auth, type User } from 'firebase/auth';
+import { connectAuthEmulator, indexedDBLocalPersistence, initializeAuth, signInAnonymously, type Auth, type User } from 'firebase/auth';
 import {
-  get, getDatabase, onDisconnect, onValue, ref, remove, runTransaction, serverTimestamp, set, update,
-  type Database, type Unsubscribe,
+  connectDatabaseEmulator, get, getDatabase, onDisconnect, onValue, ref, remove, runTransaction, serverTimestamp, set as firebaseSet, update as firebaseUpdate,
+  type Database, type DatabaseReference, type Unsubscribe,
 } from 'firebase/database';
 import type { DeckDefinition, GameAction, MatchState, PlayerSeat } from '../domain/game';
 import { applyAction, newMatch, privateProjection, publicProjection } from '../domain/game';
 import { localRepository } from './storage';
+import { validPlaymatId } from './playmats';
+import { firebaseConnectionError, firebaseValue, publicGameUpdate, restoreCards, restorePublicMatch } from './firebaseState';
+import { isHandPose, isTableSeat, shouldPublishHand, type HandPresence, type HandPresenceInput } from '../domain/tablePresence';
 
 export const TABLE_SEATS = ['northWest', 'northEast', 'southEast', 'southWest'] as const;
 export type TableSeatId = typeof TABLE_SEATS[number];
-export type Participant = { uid: string; name: string; seatId?: TableSeatId; online: boolean; joinedAt: number; ready?: boolean; deckName?: string; deckSummary?: DeckDefinition['entries'] };
+export type Participant = { uid: string; name: string; seatId?: TableSeatId; online: boolean; joinedAt: number; ready?: boolean; deckName?: string; deckSummary?: DeckDefinition['entries']; playmatId?: string };
 export type QueueParticipant = { uid: string; name: string; requestedAt: number; position: number; online: boolean };
 export type ReplacementOffer = { seatId: TableSeatId; candidateUid: string; candidateName: string; expiresAt: number; rejectedUids: Record<string, true>; acceptedUid?: string };
 export type RoomSnapshot = {
   seats: Partial<Record<TableSeatId, Participant>>; queue: QueueParticipant[]; offer?: ReplacementOffer;
   coordinatorUid?: string; online: boolean; selfUid?: string; selfSeatId?: TableSeatId;
-  queuePosition?: number; state?: MatchState; gameReady?: boolean; lastError?: string;
+  membersReady?: boolean; queuePosition?: number; state?: MatchState; gameReady?: boolean; lastError?: string;
+  roomId?: string; code?: string; name?: string; hostUid?: string; generation?: number;
+  transport?: 'p2p' | 'firebase' | 'mixed';
+  selfRole?: 'player' | 'spectator'; connectionState?: 'connecting' | 'synchronizing' | 'connected' | 'reconnecting' | 'transferring' | 'disconnected'; memberCount?: number;
 };
 
 type FirebaseConfig = Pick<FirebaseOptions, 'apiKey' | 'authDomain' | 'databaseURL' | 'projectId' | 'appId' | 'messagingSenderId' | 'storageBucket'>;
 type StoredPrivateGame = {
-  matchId: string; seatId: string; hand: string[]; library: string[]; mana: PlayerSeat['mana'];
+  matchId: string; seatId: string; hand: string[]; library: string[];
   commanderCasts: PlayerSeat['commanderCasts']; mulligans: number; keptHand: boolean; privateCards: MatchState['cards'];
 };
 type StoredPrivateSeat = { deck?: DeckDefinition; game?: StoredPrivateGame };
@@ -44,16 +50,22 @@ export class FirebaseRoom {
   readonly isConfigured: boolean;
   readonly missingConfig: string[];
   private readonly config: FirebaseConfig;
+  private readonly emulator?: { host: string; authPort: number; databasePort: number };
+  private emulatorsConnected = false;
   private app?: FirebaseApp;
   private auth?: Auth;
   private database?: Database;
   private user?: User;
   private sessionId?: string;
   private displayName = '';
+  private preferredPlaymat?: string;
   private seatId?: TableSeatId;
   private roomListener?: Unsubscribe;
   private gameListener?: Unsubscribe;
   private privateListener?: Unsubscribe;
+  private handsListener?: Unsubscribe;
+  private onHands?: (hands: HandPresence[]) => void;
+  private handsValue?: Record<string, Record<string, Omit<HandPresence, 'uid'> | null>>;
   private presenceWatcher?: Unsubscribe;
   private interval?: ReturnType<typeof setInterval>;
   private submitInProgress = false;
@@ -65,6 +77,10 @@ export class FirebaseRoom {
   private lastPublicMatch?: MatchState;
   private localPrivate?: StoredPrivateGame;
   private privateGamePending?: Promise<void>;
+  private handSequence = 0;
+  private previousHand?: HandPresenceInput;
+  private lastHandPublishedAt = 0;
+  private handDisconnectRegistered = false;
 
   constructor(environment: Record<string, string | undefined> = import.meta.env) {
     this.config = {
@@ -78,22 +94,37 @@ export class FirebaseRoom {
     };
     this.missingConfig = ['apiKey', 'authDomain', 'databaseURL', 'projectId', 'appId'].filter(key => !this.config[key as keyof FirebaseConfig]);
     this.isConfigured = this.missingConfig.length === 0;
+    if (import.meta.env.DEV && environment.VITE_FIREBASE_EMULATOR_HOST) this.emulator = {
+      host: environment.VITE_FIREBASE_EMULATOR_HOST,
+      authPort: Number(environment.VITE_FIREBASE_AUTH_EMULATOR_PORT ?? 9099),
+      databasePort: Number(environment.VITE_FIREBASE_DATABASE_EMULATOR_PORT ?? 9000),
+    };
   }
 
-  async connect(name: string, receive: (snapshot: RoomSnapshot) => void): Promise<RoomSnapshot> {
+  async connect(name: string, receive: (snapshot: RoomSnapshot) => void, receiveHands?: (hands: HandPresence[]) => void): Promise<RoomSnapshot> {
     if (!this.isConfigured) throw new Error(OVERLAYS_DISABLED_MESSAGE);
     this.displayName = name.trim().slice(0, 28);
+    this.preferredPlaymat = validPlaymatId(await localRepository.getPreference<string>('playmat-id'));
     this.onSnapshot = receive;
-    this.app ??= getApps().find(existing => existing.name === 'mana-table') ?? initializeApp(this.config, 'mana-table');
+    this.onHands = receiveHands;
+    this.handsValue = undefined;
+    this.app ??= getApps().find(existing => existing.name === 'meu-magic') ?? initializeApp(this.config, 'meu-magic');
     this.auth ??= initializeAuth(this.app, { persistence: indexedDBLocalPersistence });
     this.database ??= getDatabase(this.app);
-    const credential = this.auth.currentUser ? { user: this.auth.currentUser } : await signInAnonymously(this.auth);
+    if (this.emulator && !this.emulatorsConnected) {
+      connectAuthEmulator(this.auth, `http://${this.emulator.host}:${this.emulator.authPort}`, { disableWarnings: true });
+      connectDatabaseEmulator(this.database, this.emulator.host, this.emulator.databasePort);
+      this.emulatorsConnected = true;
+    }
+    await this.auth.authStateReady();
+    const credential = this.auth.currentUser ? { user: this.auth.currentUser } : await signInAnonymously(this.auth).catch(error => { throw firebaseConnectionError(error); });
     this.user = credential.user;
     this.sessionId = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
     this.controlMode = await this.claimLocalControl();
     if (this.controlMode) { await this.startPresence(); await this.joinRoom(); }
     else this.currentSnapshot = { ...this.emptySnapshot(), online: true };
     this.startListening();
+    this.startListeningHands();
     if (this.controlMode) void this.tryCoordinator();
     return this.currentSnapshot ?? this.emptySnapshot();
   }
@@ -111,6 +142,16 @@ export class FirebaseRoom {
       [`${ROOM_PATH}/lobby/seats/${this.seatId}/deckSummary`]: commanderSummary,
     });
     void self;
+  }
+
+  async setPlaymat(id: string | undefined): Promise<void> {
+    if (id && !validPlaymatId(id)) throw new Error('Este playmat não está na biblioteca.');
+    const seatId = this.seatId;
+    if (!seatId || !this.controlMode) throw new Error('Você precisa ocupar um lugar para alterar o playmat.');
+    const seat = await this.readValue<Participant>(`${ROOM_PATH}/lobby/seats/${seatId}`);
+    if (seat?.uid !== this.requireIdentity().uid) throw new Error('Este lugar não pertence mais a você.');
+    await set(ref(this.requireDatabase(), `${ROOM_PATH}/lobby/seats/${seatId}/playmatId`), id ?? null);
+    this.preferredPlaymat = id;
   }
 
   async markReady(isReady: boolean): Promise<void> {
@@ -139,6 +180,7 @@ export class FirebaseRoom {
       [`${ROOM_PATH}/lobby/seats/${offer.seatId}/name`]: this.displayName,
       [`${ROOM_PATH}/lobby/seats/${offer.seatId}/joinedAt`]: ticket.requestedAt,
       [`${ROOM_PATH}/lobby/seats/${offer.seatId}/ready`]: Boolean(seat.ready),
+      [`${ROOM_PATH}/lobby/seats/${offer.seatId}/playmatId`]: this.preferredPlaymat ?? null,
       [`${ROOM_PATH}/lobby/seats/${offer.seatId}/leftAt`]: null,
       [`${ROOM_PATH}/lobby/seats/${offer.seatId}/lastOfflineAt`]: null,
     });
@@ -161,6 +203,7 @@ export class FirebaseRoom {
 
   async leave(): Promise<void> {
     const self = this.requireIdentity(); const database = this.requireDatabase();
+    await this.clearHandPresence();
     if (this.seatId) await update(ref(database, `${ROOM_PATH}/lobby/seats/${this.seatId}`), { leftAt: Date.now(), ready: false });
     await remove(ref(database, `${ROOM_PATH}/lobby/queue/${self.uid}`));
     if (this.sessionId) await remove(ref(database, `${ROOM_PATH}/lobby/presence/${self.uid}/${this.sessionId}`));
@@ -178,12 +221,12 @@ export class FirebaseRoom {
       const next = applyAction(current, this.seatId, action, Date.now());
       const lastAction = { id, actorUid: self.uid, actorSeatId: this.seatId, type: action.type, at: Date.now() };
       await update(ref(database), {
-        [`${ROOM_PATH}/game/public`]: { ...publicProjection(next), lastAction },
+        [`${ROOM_PATH}/game/public`]: { ...publicGameUpdate(next, this.seatId), lastAction },
         [`${ROOM_PATH}/privateSeats/${this.seatId}/game`]: { ...privateProjection(next, this.seatId), matchId: next.id, seatId: this.seatId },
         [`${ROOM_PATH}/game/actionIds/${id}`]: { actorUid: self.uid, revision: next.revision, createdAt: serverTimestamp() },
       });
       this.localPrivate = { ...privateProjection(next, this.seatId), matchId: next.id, seatId: this.seatId };
-      this.hydrateGame(publicProjection(next) as MatchState);
+      this.hydrateGame(publicGameUpdate(next, this.seatId) as MatchState);
       return next;
     } catch (error) {
       const details = error instanceof Error ? error.message.toLowerCase() : '';
@@ -194,10 +237,30 @@ export class FirebaseRoom {
 
   async getCachedDecks(): Promise<DeckDefinition[]> { return localRepository.getDecks(); }
 
+  async publishHand(input: HandPresenceInput): Promise<void> {
+    const self = this.requireIdentity();
+    const seatId = this.seatId;
+    if (!this.controlMode || !seatId || input.seatId !== seatId || !this.currentSnapshot?.online || input.matchId !== this.lastPublicMatch?.id || this.lastPublicMatch.phase === 'finished') return;
+    const now = Date.now();
+    const next: HandPresenceInput = { ...input, sequence: ++this.handSequence };
+    if (!shouldPublishHand(this.previousHand, next, now - this.lastHandPublishedAt)) return;
+    this.previousHand = next;
+    this.lastHandPublishedAt = now;
+    const database = this.requireDatabase();
+    const presence = ref(database, `${ROOM_PATH}/tablePresence/${self.uid}/${this.sessionId}`);
+    if (!this.handDisconnectRegistered) {
+      await onDisconnect(presence).remove();
+      this.handDisconnectRegistered = true;
+    }
+    await set(presence, { ...next, uid: self.uid, sessionId: this.sessionId, updatedAt: now });
+  }
+
   async disconnectListeners(): Promise<void> {
-    this.roomListener?.(); this.gameListener?.(); this.privateListener?.(); this.presenceWatcher?.();
+    await this.clearHandPresence();
+    this.roomListener?.(); this.gameListener?.(); this.privateListener?.(); this.handsListener?.(); this.presenceWatcher?.();
     if (this.interval) clearInterval(this.interval);
-    this.roomListener = undefined; this.gameListener = undefined; this.privateListener = undefined; this.presenceWatcher = undefined; this.interval = undefined;
+    this.roomListener = undefined; this.gameListener = undefined; this.privateListener = undefined; this.handsListener = undefined; this.presenceWatcher = undefined; this.interval = undefined;
+    this.onHands = undefined; this.handsValue = undefined; this.previousHand = undefined; this.handSequence = 0; this.lastHandPublishedAt = 0; this.handDisconnectRegistered = false;
     this.releaseControlLock?.(); this.releaseControlLock = undefined; this.controlMode = false;
   }
 
@@ -207,7 +270,7 @@ export class FirebaseRoom {
     let settle: (available: boolean) => void = () => {};
     const available = new Promise<boolean>(resolve => { settle = resolve; });
     const lockHeld = new Promise<void>(resolve => { release = resolve; });
-    void navigator.locks.request('mana-table-control', { mode: 'exclusive', ifAvailable: true }, async lock => {
+    void navigator.locks.request('meu-magic-control', { mode: 'exclusive', ifAvailable: true }, async lock => {
       if (!lock) { settle(false); return; }
       this.releaseControlLock = release;
       settle(true);
@@ -220,8 +283,12 @@ export class FirebaseRoom {
     const database = this.requireDatabase(); const self = this.requireIdentity();
     const presence = ref(database, `${ROOM_PATH}/lobby/presence/${self.uid}/${this.sessionId}`);
     this.presenceWatcher = onValue(ref(database, '.info/connected'), async snapshot => {
-      if (!snapshot.val()) { this.emit({ online: false }); return; }
+      if (!snapshot.val()) { this.handDisconnectRegistered = false; this.previousHand = undefined; this.emit({ online: false }); return; }
       await onDisconnect(presence).remove();
+      if (this.sessionId) {
+        await onDisconnect(ref(database, `${ROOM_PATH}/tablePresence/${self.uid}/${this.sessionId}`)).remove();
+        this.handDisconnectRegistered = true;
+      }
       await set(presence, { name: this.displayName, lastSeen: serverTimestamp() });
       this.emit({ online: true });
     });
@@ -242,7 +309,7 @@ export class FirebaseRoom {
         return;
       }
       this.seatId = knownSeat;
-      await update(ref(database, `${ROOM_PATH}/lobby/seats/${knownSeat}`), { name: this.displayName, leftAt: null, lastOfflineAt: null });
+      await update(ref(database, `${ROOM_PATH}/lobby/seats/${knownSeat}`), { name: this.displayName, playmatId: this.preferredPlaymat ?? null, leftAt: null, lastOfflineAt: null });
       if (currentOffer?.candidateUid && !currentOffer.acceptedUid) await remove(ref(database, `${ROOM_PATH}/lobby/offers/${knownSeat}`));
       await this.bindPrivateSeat(knownSeat);
       return;
@@ -256,7 +323,7 @@ export class FirebaseRoom {
     if (!game || game.phase === 'finished') {
       for (const seatId of TABLE_SEATS) {
         const target = ref(database, `${ROOM_PATH}/lobby/seats/${seatId}`);
-        const result = await runTransaction(target, current => current?.uid ? undefined : { uid: self.uid, name: this.displayName, seatId, ready: false, joinedAt: Date.now() });
+        const result = await runTransaction(target, current => current?.uid ? undefined : { uid: self.uid, name: this.displayName, seatId, ready: false, joinedAt: Date.now(), playmatId: this.preferredPlaymat ?? null });
         if (result.committed) { this.seatId = seatId; await this.bindPrivateSeat(seatId); return; }
       }
     }
@@ -281,6 +348,38 @@ export class FirebaseRoom {
       else if (this.controlMode && this.isLeader()) void this.processQueue();
       void self;
     }, () => this.emit({ online: false, lastError: 'A mesa caiu. Nenhuma jogada pendente foi confirmada.' }));
+    if (this.handsValue) this.refreshHands();
+  }
+
+  private startListeningHands(): void {
+    this.handsListener?.();
+    this.handsListener = onValue(ref(this.requireDatabase(), `${ROOM_PATH}/tablePresence`), snapshot => {
+      this.handsValue = snapshot.val() ?? {};
+      this.refreshHands();
+    }, () => this.onHands?.([]));
+  }
+
+  private refreshHands(): void {
+      const bySeat = new Map<string, HandPresence>();
+      const seats = this.currentSnapshot?.seats ?? {};
+      for (const [uid, sessions] of Object.entries(this.handsValue ?? {})) for (const [sessionId, raw] of Object.entries(sessions ?? {})) {
+        if (!raw || raw.sessionId !== sessionId || raw.matchId !== this.lastPublicMatch?.id || !isTableSeat(raw.seatId) || !isHandPose(raw.pose)) continue;
+        const seat = seats[raw.seatId];
+        if (!seat?.online || seat.uid !== uid || this.lastPublicMatch?.seats.find(candidate => candidate.id === raw.seatId)?.status !== 'playing') continue;
+        if (raw.zone === 'table' && (typeof raw.x !== 'number' || typeof raw.y !== 'number')) continue;
+        if (raw.zone !== 'table' && raw.zone !== 'private') continue;
+        const hand = { ...raw, uid, sessionId } as HandPresence;
+        const prior = bySeat.get(hand.seatId);
+        if (prior?.uid === uid && prior.sessionId === sessionId && hand.sequence <= prior.sequence) continue;
+        if (!prior || hand.updatedAt > prior.updatedAt || hand.updatedAt === prior.updatedAt && hand.sequence > prior.sequence) bySeat.set(hand.seatId, hand);
+      }
+      this.onHands?.([...bySeat.values()]);
+  }
+
+  private async clearHandPresence(): Promise<void> {
+    if (!this.user || !this.sessionId || !this.database || !this.handDisconnectRegistered) return;
+    await remove(ref(this.database, `${ROOM_PATH}/tablePresence/${this.user.uid}/${this.sessionId}`)).catch(() => {});
+    this.handDisconnectRegistered = false;
   }
 
   private async bindPrivateSeat(seatId: TableSeatId): Promise<void> {
@@ -293,14 +392,16 @@ export class FirebaseRoom {
   }
 
   private hydrateGame(publicState: MatchState): void {
+    publicState = restorePublicMatch(publicState);
     this.lastPublicMatch = publicState;
+    this.refreshHands();
     const hydrated = structuredClone(publicState);
     const selfSeatId = this.currentSnapshot?.selfSeatId;
     const secret = this.localPrivate;
-    if (selfSeatId && secret?.matchId === publicState.id) {
+    if (this.controlMode && selfSeatId && secret?.matchId === publicState.id) {
       const seat = hydrated.seats.find(candidate => candidate.id === selfSeatId);
-      if (seat) Object.assign(seat, { hand: secret.hand ?? [], library: secret.library ?? [], mana: secret.mana ?? seat.mana, commanderCasts: secret.commanderCasts ?? seat.commanderCasts, mulligans: secret.mulligans ?? seat.mulligans, keptHand: secret.keptHand ?? seat.keptHand });
-      Object.assign(hydrated.cards, secret.privateCards ?? {});
+      if (seat) Object.assign(seat, { hand: secret.hand ?? [], library: secret.library ?? [], commanderCasts: secret.commanderCasts ?? seat.commanderCasts, mulligans: secret.mulligans ?? seat.mulligans, keptHand: secret.keptHand ?? seat.keptHand });
+      Object.assign(hydrated.cards, restoreCards(secret.privateCards));
     }
     this.emit({ state: hydrated, gameReady: true });
   }
@@ -349,7 +450,14 @@ export class FirebaseRoom {
     })) as RoomSnapshot['seats'];
     const queue = Object.values(lobby.queue ?? {}).sort((first, second) => first.requestedAt - second.requestedAt || first.uid.localeCompare(second.uid)).map((ticket, index) => ({ ...ticket, position: index + 1, online: Object.keys(onlinePresence[ticket.uid] ?? {}).length > 0 }));
     const selfSeatId = this.controlMode ? TABLE_SEATS.find(seatId => seats[seatId]?.uid === self.uid) : undefined;
-    if (selfSeatId !== this.seatId) { this.seatId = selfSeatId; if (selfSeatId) void this.bindPrivateSeat(selfSeatId); }
+    if (selfSeatId !== this.seatId) {
+      if (this.handDisconnectRegistered) void this.clearHandPresence();
+      this.seatId = selfSeatId;
+      if (selfSeatId) {
+        void this.bindPrivateSeat(selfSeatId);
+        void this.setPlaymat(this.preferredPlaymat).catch(() => this.emit({ lastError: 'Não foi possível restaurar seu playmat neste lugar.' }));
+      }
+    }
     const existing = this.currentSnapshot;
     this.currentSnapshot = {
       seats, queue, online: existing?.online ?? true, selfUid: self.uid, selfSeatId,
@@ -357,6 +465,7 @@ export class FirebaseRoom {
       offer: this.controlMode ? Object.values(lobby.offers ?? {}).find(offer => offer?.candidateUid === self.uid && !offer.acceptedUid) : undefined,
       coordinatorUid: lobby.coordinator?.uid, state: existing?.state, gameReady: existing?.gameReady,
     };
+    this.refreshHands();
     if (selfSeatId && this.lastPublicMatch) void this.ensurePrivateGame(selfSeatId, this.lastPublicMatch);
     this.onSnapshot?.(this.currentSnapshot);
   }
@@ -440,9 +549,10 @@ export class FirebaseRoom {
     if (!target || target.status === 'eliminated') return;
     target.status = 'eliminated'; next.cards = Object.fromEntries(Object.entries(next.cards).filter(([, card]) => card.ownerId !== seatId));
     next.stack = next.stack.filter(item => item.controllerId !== seatId); next.passes = []; next.revision++; next.updatedAt = Date.now();
+    if (next.hiddenZones) next.hiddenZones[seatId] = { hand: 0, library: 0, graveyard: 0, exile: 0 };
     if (next.seats.filter(seat => seat.status === 'playing').length <= 1) next.phase = 'finished';
     next.log.push({ id: `${next.id}-${next.revision}`, actorId: this.seatId ?? 'room', message: `${departed.name} deixou a partida.`, at: next.updatedAt, public: true });
-    const publicView = publicProjection(next);
+    const publicView = publicGameUpdate(next);
     await update(ref(this.requireDatabase()), {
       [`${ROOM_PATH}/game/public`]: { ...publicView, lastAction: { id: `leave-${next.revision}`, actorUid: this.requireIdentity().uid, actorSeatId: this.seatId ?? null, type: 'ELIMINATE_SEAT', at: next.updatedAt } },
       [`${ROOM_PATH}/lobby/seats/${seatId}/status`]: 'vacated',
@@ -458,7 +568,7 @@ export class FirebaseRoom {
     next.log.push({ id: `${next.id}-${next.revision}`, actorId: 'room', message: paused ? 'A partida pausou enquanto um lugar reconecta ou recebe uma oferta.' : 'A partida foi retomada.', at: next.updatedAt, public: true });
     if (next.log.length > 160) next.log = next.log.slice(-160);
     await update(ref(this.requireDatabase()), {
-      [`${ROOM_PATH}/game/public`]: { ...publicProjection(next), lastAction: { id, actorUid: this.requireIdentity().uid, actorSeatId: this.seatId ?? null, type: paused ? 'PAUSE_MATCH' : 'RESUME_MATCH', at: next.updatedAt } },
+      [`${ROOM_PATH}/game/public`]: { ...publicGameUpdate(next), lastAction: { id, actorUid: this.requireIdentity().uid, actorSeatId: this.seatId ?? null, type: paused ? 'PAUSE_MATCH' : 'RESUME_MATCH', at: next.updatedAt } },
       [`${ROOM_PATH}/game/actionIds/${id}`]: { actorUid: this.requireIdentity().uid, revision: next.revision, createdAt: serverTimestamp() },
     });
   }
@@ -467,9 +577,15 @@ export class FirebaseRoom {
     if (!this.isLeader()) return;
     const [lobby, existing] = await Promise.all([this.readLobby(), this.readValue<MatchState>(`${ROOM_PATH}/game/public`)]);
     if (existing) return;
-    if (!TABLE_SEATS.every(seatId => lobby.seats?.[seatId]?.uid && lobby.seats[seatId]?.ready && lobby.seats[seatId]?.deckSummary?.length)) return;
+    const players = TABLE_SEATS.map(seatId => lobby.seats?.[seatId]).filter((seat): seat is Participant => Boolean(seat?.uid));
+    if (!players.length || players.some(seat => !seat.ready || !seat.deckSummary?.length)) return;
     const entrants = TABLE_SEATS.map(seatId => {
-      const seat = lobby.seats![seatId]!;
+      const seat = lobby.seats?.[seatId];
+      if (!seat?.uid) {
+        const commander = { cardId: `covered-${seatId}-commander`, name: 'Comandante', quantity: 1 as const, role: 'commander' as const };
+        const fillers = Array.from({ length: 99 }, (_, index) => ({ cardId: `covered-${seatId}-${index}`, name: `Carta oculta ${index + 1}`, quantity: 1 as const, role: 'library' as const }));
+        return { seatId, name: 'Lugar disponível', deck: { id: `seat-${seatId}`, name: 'Lugar disponível', format: 'commander' as const, commanders: [commander.cardId], entries: [commander, ...fillers], updatedAt: Date.now() } };
+      }
       const commanders = seat.deckSummary!.filter(entry => entry.role === 'commander');
       const fillers = Array.from({ length: 100 - commanders.length }, (_, index) => ({ cardId: `covered-${seatId}-${index}`, name: `Carta oculta ${index + 1}`, quantity: 1, role: 'library' as const }));
       return { seatId, name: seat.name, deck: { id: `seat-${seatId}`, name: seat.deckName || 'Deck Commander', format: 'commander' as const, commanders: commanders.map(entry => entry.cardId), entries: [...commanders, ...fillers], updatedAt: Date.now() } };
@@ -509,7 +625,8 @@ export class FirebaseRoom {
   private async readLobby(): Promise<LobbyData> { return await this.readValue<LobbyData>(`${ROOM_PATH}/lobby`) ?? {}; }
   private async readValue<T>(path: string): Promise<T | undefined> {
     const snapshot = await get(ref(this.requireDatabase(), path));
-    return snapshot.exists() ? snapshot.val() as T : undefined;
+    if (!snapshot.exists()) return undefined;
+    return (path.endsWith('/game/public') ? restorePublicMatch(snapshot.val() as MatchState) : snapshot.val()) as T;
   }
   private requireDatabase(): Database { if (!this.database) throw new Error(OVERLAYS_DISABLED_MESSAGE); return this.database; }
   private requireIdentity(): User { if (!this.user) throw new Error('Entre na sala antes de continuar.'); return this.user; }
@@ -529,3 +646,6 @@ function placeholderDeck(seatId: string, seat: Participant): DeckDefinition {
 export const firebaseRoom = new FirebaseRoom();
 
 function friendly(error: unknown): string { return error instanceof Error ? error.message : 'A sala não pôde ser atualizada.'; }
+
+function set(target: DatabaseReference, value: unknown): Promise<void> { return firebaseSet(target, firebaseValue(value)); }
+function update(target: DatabaseReference, value: Record<string, unknown>): Promise<void> { return firebaseUpdate(target, firebaseValue(value)); }

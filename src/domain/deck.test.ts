@@ -60,6 +60,11 @@ describe('Commander deck tools', () => {
     const first = definition('first', 'Frodo, Scout', ['W'], { keywords: ['Partner'], oracle_text: 'Partner with Sam, Garden Friend.' });
     const second = definition('second', 'Sam, Garden Friend', ['G'], { keywords: ['Partner'], oracle_text: 'Partner with Frodo, Scout.' });
     expect(areValidPartners([first, second])).toBe(true);
+    first.keywords = ['Partner with', 'Vigilance', 'Partner'];
+    second.keywords = ['Partner with', 'Partner'];
+    first.oracle_text = 'Partner with Sam, Garden Friend (When this creature enters, search your library.)\nVigilance';
+    second.oracle_text = 'Partner with Frodo, Scout (When this creature enters, search your library.)';
+    expect(areValidPartners([first, second])).toBe(true);
     const backgroundOwner = definition('laezel', 'Warrior of the Gate', ['W'], { oracle_text: 'Choose a Background.' });
     const background = definition('background', 'Quiet Scholar', ['U'], { type_line: 'Legendary Enchantment — Background' });
     expect(areValidPartners([backgroundOwner, background])).toBe(true);

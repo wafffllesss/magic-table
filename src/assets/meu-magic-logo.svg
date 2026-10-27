@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" fill="none">
+  <title>Meu Magic</title>
+  <desc>Pentágono regular com cinco faixas entrelaçadas: branca, azul, cinza, vermelha e verde. Cada faixa passa sobre a anterior e sob a seguinte.</desc>
+
+  <defs>
+    <!-- Regular pentagon: center (320, 320), circumradius 240, band width 64.
+         All five ribbons share this geometry, rotated in steps of 72 degrees.
+         Each joint continues the next ribbon's inner edge to the outer edge. -->
+    <path id="meu-magic-ribbon" d="M265.5583 119.5542 320 80 493.8119 206.2817 473.0171 270.2817Z"/>
+
+    <!-- Shadow falls only beneath the next ribbon at each joint. -->
+    <linearGradient id="meu-magic-overlap" gradientUnits="userSpaceOnUse"
+      x1="474.7908" y1="200.1014" x2="493.8119" y2="206.2817">
+      <stop stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".24"/>
+    </linearGradient>
+  </defs>
+
+  <g>
+    <use href="#meu-magic-ribbon" fill="#F4F4F4"/>
+    <use href="#meu-magic-ribbon" fill="url(#meu-magic-overlap)"/>
+  </g>
+  <g transform="rotate(72 320 320)">
+    <use href="#meu-magic-ribbon" fill="#078FF2"/>
+    <use href="#meu-magic-ribbon" fill="url(#meu-magic-overlap)"/>
+  </g>
+  <g transform="rotate(144 320 320)">
+    <use href="#meu-magic-ribbon" fill="#505050"/>
+    <use href="#meu-magic-ribbon" fill="url(#meu-magic-overlap)"/>
+  </g>
+  <g transform="rotate(216 320 320)">
+    <use href="#meu-magic-ribbon" fill="#E53238"/>
+    <use href="#meu-magic-ribbon" fill="url(#meu-magic-overlap)"/>
+  </g>
+  <g transform="rotate(288 320 320)">
+    <use href="#meu-magic-ribbon" fill="#43B51B"/>
+    <use href="#meu-magic-ribbon" fill="url(#meu-magic-overlap)"/>
+  </g>
+</svg>
