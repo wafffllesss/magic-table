@@ -40,6 +40,7 @@ export class PeerRoom extends EventTarget {
   private seenActions = new Map<string, number>();
   private pendingEliminations = new Set<TableSeatId>();
   private controlLock = false;
+  private controlReconcilePending = false;
   private actionLock = false;
   private startLock = false;
   private resetLock = false;
@@ -656,14 +657,15 @@ export class PeerRoom extends EventTarget {
   }
 
   private async reconcileDisconnectedPlayers(): Promise<void> {
-    if (!this.isHost() || !this.publicState || this.publicState.phase === 'finished' || this.controlLock) return;
+    if (!this.isHost() || !this.publicState || this.publicState.phase === 'finished') return;
+    if (this.controlLock) { this.controlReconcilePending = true; return; }
     const detected = this.publicState.seats.filter(seat => seat.status === 'playing' && seat.participantUid && seat.participantUid !== this.backend.uid)
       .filter(seat => {
         const member = this.members.find(candidate => candidate.uid === seat.participantUid);
         return Boolean(member && (member.role !== 'player' || member.seatId !== seat.id || !this.isOnline(member.uid) || !this.transport?.connectedPeerUids.includes(member.uid)));
       }).map(seat => seat.id);
     const prior = this.publicState.disconnectedSeatIds ?? [];
-    const disconnected = [...new Set([...detected, ...prior.filter(id => this.publicState?.seats.some(seat => seat.id === id && this.members.some(member => member.uid === seat.participantUid) && seat.status === 'playing'))])];
+    const disconnected = [...new Set([...detected, ...prior.filter(id => this.publicState?.seats.some(seat => seat.id === id && !this.members.some(member => member.uid === seat.participantUid) && seat.status === 'playing'))])];
     if (disconnected.length === prior.length && disconnected.every(id => prior.includes(id))) return;
     if (this.publicState.phase === 'mulligan' && disconnected.length) {
       await this.publishControlTransition(state => { state.disconnectedSeatIds = disconnected; state.paused = true; });
@@ -706,7 +708,10 @@ export class PeerRoom extends EventTarget {
       await this.saveLocalState(this.publicState, this.privateState());
       this.publishState();
       await this.transport?.sendHost('CONTROL', { state: this.publicState }, this.publicState.revision, `control-${this.publicState.revision}`);
-    } finally { this.controlLock = false; }
+    } finally {
+      this.controlLock = false;
+      if (this.controlReconcilePending) { this.controlReconcilePending = false; void this.reconcileDisconnectedPlayers(); }
+    }
   }
   private publishMembers(membersReady = false): void {
     if (!this.snapshot) return;
