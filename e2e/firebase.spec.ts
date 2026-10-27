@@ -102,6 +102,34 @@ test('synchronizes four players, protects hidden zones and restores the same pla
       }
       await expect(page.getByRole('button', { name: /Confirmar meu lugar/ })).toBeEnabled();
     }
+    // Exercise the Firebase fallback in both directions even when WebRTC is available.
+    const ids = await Promise.all(pages.slice(0, 2).map(page => page.evaluate(async () => {
+      const { roomBackend } = await import('/src/services/roomBackend.ts');
+      return roomBackend.uid!;
+    })));
+    for (const [index, page] of pages.slice(0, 2).entries()) {
+      await page.evaluate(async ({ roomId, peer }) => {
+        const { roomBackend } = await import('/src/services/roomBackend.ts');
+        const bus = roomBackend.createDataBus(roomId);
+        const received: { packets: string[]; presences: unknown[] } = { packets: [], presences: [] };
+        (window as any).relayTest = received;
+        bus.subscribe(peer, 1, '00000000-0000-4000-8000-000000000001', (_sequence, packet) => { received.packets.push(packet); });
+        bus.subscribePresence(peer, 1, '00000000-0000-4000-8000-000000000001', payload => { received.presences.push(payload); });
+      }, { roomId, peer: ids[1 - index] });
+    }
+    for (const [index, page] of pages.slice(0, 2).entries()) {
+      await page.evaluate(async ({ roomId, peer, index }) => {
+        const { roomBackend } = await import('/src/services/roomBackend.ts');
+        const bus = roomBackend.createDataBus(roomId);
+        await bus.send(peer, 1, '00000000-0000-4000-8000-000000000001', 0, `packet-${index}`);
+        await bus.sendPresence(peer, 1, '00000000-0000-4000-8000-000000000001', { sequence: index, pose: 'rest', zone: 'table', updatedAt: Date.now() });
+      }, { roomId, peer: ids[1 - index], index });
+    }
+    for (const [index, page] of pages.slice(0, 2).entries()) {
+      await expect.poll(() => page.evaluate(() => (window as any).relayTest)).toMatchObject({
+        packets: [`packet-${1 - index}`], presences: [{ sequence: 1 - index }],
+      });
+    }
     for (const page of pages) await page.getByRole('button', { name: /Confirmar meu lugar/ }).click();
     for (const page of pages) {
       await expect(page.locator('.player-mat')).toHaveCount(4);

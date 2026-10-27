@@ -17,6 +17,27 @@ function transport(): any {
 afterEach(() => vi.useRealTimers());
 
 describe('peer delivery', () => {
+  it('requests a fresh offer when the host starts again', async () => {
+    const host = transport();
+    const send = vi.fn(async () => {});
+    host.signalBus = { send, subscribe: () => () => {} };
+    await host.start(['host', 'guest']);
+    await host.start(['host', 'guest']);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ targetUid: 'guest', reconnect: true }));
+
+    const guest = transport(); guest.selfUid = 'guest';
+    const old = { pc: { close: vi.fn() } };
+    guest.peers.set('host', old);
+    guest.offered.add('host');
+    const start = vi.spyOn(guest, 'start').mockResolvedValue(undefined);
+    await guest.receiveSignal({ roomId: 'room', senderUid: 'host', targetUid: 'guest', generation: 1, linkId: 'new-host', reconnect: true });
+    expect(old.pc.close).toHaveBeenCalledOnce();
+    expect(guest.offered.has('host')).toBe(false);
+    expect(start).toHaveBeenCalledWith(['host']);
+    await host.close();
+  });
+
   it('caches temporary TURN credentials and keeps STUN when issuance fails', async () => {
     const load = vi.fn().mockResolvedValueOnce({
       iceServers: [{ urls: 'turn:turn.example.org:3478', username: 'user', credential: 'token' }],
