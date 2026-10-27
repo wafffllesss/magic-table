@@ -29,6 +29,9 @@ test('composes chat in the lobby and shows bubbles through the table transition'
     peerRoom.saveDeck = async () => {};
     peerRoom.sendChat = async text => { peerRoom.dispatchEvent(new CustomEvent('chat-message', { detail: { id: crypto.randomUUID(), uid: 'player', seatId: 'southWest', text, at: Date.now() } })); };
   });
+  // Remount the room browser so it initializes using the mocked backend.
+  await page.getByRole('button', { name: /Trocar deck/ }).click();
+  await page.getByRole('button', { name: 'Escolher Forged in Stone', exact: true }).click();
   await page.getByRole('button', { name: 'Criar mesa', exact: true }).click();
   await page.getByRole('button', { name: 'Criar mesa e entrar', exact: true }).click();
   await expect(page.locator('.lobby-shell')).toBeVisible();
