@@ -32,7 +32,7 @@ test('renders the exact public count, including disconnected opponents, without 
   for (const count of [0, 1, 2, 7, 15, 50, 7, 6, 0]) {
     await page.evaluate(count => window.postMessage({ type: 'count', seatId: 'northWest', count }), count);
     await expect(hand.locator('.opponent-hand-card')).toHaveCount(count);
-    await expect(hand.locator('.opponent-hand-count')).toHaveText(`${count} NA MÃO`);
+    await expect(hand.locator('.opponent-hand-count')).toHaveText(`${count} na mão`);
     await expect(hand).toHaveAttribute('aria-label', `Mão de northWest: ${count} ${count === 1 ? 'carta' : 'cartas'}`);
   }
   await expect(hand).toHaveCSS('pointer-events', 'none');
@@ -71,7 +71,8 @@ test('anchors outside each playmat and follows the table camera for players and 
   await page.screenshot({ path: 'test-results/opponent-hands-overview.png' });
   const camera = page.locator('.camera-scene');
   const before = await camera.getAttribute('style');
-  await page.getByTitle('Aproximar', { exact: true }).click();
+  await page.locator('.table-stage').hover();
+  await page.mouse.wheel(0, -300);
   await expect(camera).not.toHaveAttribute('style', before!);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByTitle('Visão geral', { exact: true }).click();

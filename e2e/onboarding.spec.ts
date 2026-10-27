@@ -5,6 +5,7 @@ import type { Page } from '@playwright/test';
 
 async function seed(page: Page, selected = false): Promise<void> {
   await page.goto('/');
+  if (await page.locator('.startup-shell').isVisible()) await page.locator('.startup-shell button').last().click();
   await expect(page.getByLabel('Seu nome', { exact: true })).toBeVisible();
   await page.evaluate(async ({ decks, selected }) => {
     const { localRepository } = await import('/src/services/storage.ts');
@@ -90,6 +91,7 @@ test('cancel preserves name and deck, changes persist, and demo returns to games
   await page.getByRole('button', { name: /Alterar nome/ }).click();
   await page.getByLabel('Seu nome', { exact: true }).fill('Ana');
   await page.getByRole('button', { name: 'Continuar', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
   await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
@@ -148,7 +150,7 @@ test('does not overwrite a running match deck', async ({ page }) => {
 });
 
 test('keeps an invite until name and deck are ready', async ({ page }) => {
-  await page.addInitScript(() => { (window as any).meuMagicDesktop = { onInvite: (callback: any) => { (window as any).deliverInvite = callback; return () => {}; }, onBeforeQuit: () => () => {}, onLegacyMigrationEvent: () => () => {}, acknowledgeLegacyMigrationEvent: () => {}, startLegacyMigration: async () => true }; });
+  await page.addInitScript(() => { (window as any).meuMagicDesktop = { checkForUpdate: async () => null, onInvite: (callback: any) => { (window as any).deliverInvite = callback; return () => {}; }, onMcpToolCall: () => () => {}, onBeforeQuit: () => () => {}, onLegacyMigrationEvent: () => () => {}, acknowledgeLegacyMigrationEvent: () => {}, startLegacyMigration: async () => true }; });
   await seed(page); await mockOnline(page);
   await page.evaluate(() => (window as any).deliverInvite('LOCKROOM'));
   await expect(page.getByLabel('Seu nome', { exact: true })).toBeVisible();
@@ -183,6 +185,7 @@ test('keeps the demo usable when the directory fails and persists a changed deck
   await expect(page.getByText('Diretório indisponível', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: /Trocar deck/ }).click();
   await page.getByRole('button', { name: 'Escolher Family Matters', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Family Matters · Trocar deck/ })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('button', { name: /Family Matters · Trocar deck/ })).toBeVisible();
   await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
