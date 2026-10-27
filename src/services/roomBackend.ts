@@ -426,18 +426,18 @@ export class RoomBackend implements RoomService {
   createDataBus(roomId: string): RoomDataBus {
     const database = this.requireDatabase();
     const uid = this.requireUid();
-    const messagePath = (peerUid: string, generation: number, linkId: string) => {
+    const messagePath = (peerUid: string, generation: number, linkId: string, outgoing = false) => {
       if (!validLinkId(linkId) || !Number.isSafeInteger(generation) || generation < 1 || !uid || uid === peerUid) throw new Error('Vínculo de sincronização inválido.');
-      return `p2pRelay/${roomId}/${generation}/${uid}/${peerUid}/${linkId}`;
+      return `p2pRelay/${roomId}/${generation}/${outgoing ? peerUid : uid}/${outgoing ? uid : peerUid}/${linkId}`;
     };
-    const presencePath = (peerUid: string, generation: number, linkId: string) => {
+    const presencePath = (peerUid: string, generation: number, linkId: string, outgoing = false) => {
       if (!validLinkId(linkId) || !Number.isSafeInteger(generation) || generation < 1 || !uid || uid === peerUid) throw new Error('Vínculo de presença inválido.');
-      return `p2pRelayPresence/${roomId}/${generation}/${peerUid}/${uid}/${linkId}`;
+      return `p2pRelayPresence/${roomId}/${generation}/${outgoing ? peerUid : uid}/${outgoing ? uid : peerUid}/${linkId}`;
     };
     return {
       send: async (peerUid, generation, linkId, sequence, packet) => {
         if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence > 1_000_000 || typeof packet !== 'string' || packet.length > 32_768) throw new Error('Pacote de sincronização fora dos limites.');
-        const path = messagePath(peerUid, generation, linkId);
+        const path = messagePath(peerUid, generation, linkId, true);
         const key = String(sequence).padStart(12, '0');
         await set(ref(database, `${path}/${key}`), { roomId, generation, linkId, senderUid: uid, targetUid: peerUid, sequence, packet, sentAt: serverTimestamp() });
       },
@@ -455,7 +455,7 @@ export class RoomBackend implements RoomService {
         });
       },
       sendPresence: async (peerUid, generation, linkId, payload) => {
-        await set(ref(database, presencePath(peerUid, generation, linkId)), { roomId, generation, linkId, senderUid: uid, targetUid: peerUid, payload, sentAt: serverTimestamp() });
+        await set(ref(database, presencePath(peerUid, generation, linkId, true)), { roomId, generation, linkId, senderUid: uid, targetUid: peerUid, payload, sentAt: serverTimestamp() });
       },
       subscribePresence: (peerUid, generation, linkId, receive) => onValue(ref(database, presencePath(peerUid, generation, linkId)), snapshot => {
         const value = snapshot.val() as { roomId?: string; generation?: number; linkId?: string; senderUid?: string; targetUid?: string; payload?: unknown; sentAt?: number } | null;

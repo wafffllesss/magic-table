@@ -55,6 +55,19 @@ describe('room chat', () => {
 });
 
 describe('peer room checkpoints', () => {
+  it('unpauses when a previously disconnected player is online and connected again', async () => {
+    const room = session();
+    room.snapshot.hostUid = 'guest';
+    room.publicState.disconnectedSeatIds = ['northWest'];
+    room.publicState.paused = true;
+    room.members = [{ uid: 'guest', role: 'player', seatId: 'southWest' }, { uid: 'uid-northWest', role: 'player', seatId: 'northWest' }];
+    room.presence = { 'uid-northWest': { session: { online: true } } };
+    room.transport.connectedPeerUids = ['uid-northWest'];
+    await room.reconcileDisconnectedPlayers();
+    expect(room.publicState.disconnectedSeatIds).toEqual([]);
+    expect(room.publicState.paused).toBe(false);
+  });
+
   it('accepts the last player passing priority on another player’s instant', async () => {
     const room = session();
     room.snapshot = { ...room.snapshot, hostUid: 'guest', connectionState: 'connected' };
