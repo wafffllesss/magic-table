@@ -4,9 +4,10 @@ import { nextVersion, parseVersion, selectRelease } from './release-version.mjs'
 import { validateReleaseEnvironment } from './release-prerequisites.mjs';
 
 test('increments the highest stable version and ignores unrelated tags', () => {
-  assert.equal(nextVersion('0.0.2', []), '0.0.3');
+  assert.equal(nextVersion('0.0.3', []), '0.0.3');
   assert.equal(nextVersion('0.0.2', ['v0.0.9', 'v0.1.0', 'v3.0.0-rc.1', 'other']), '0.1.1');
-  assert.equal(nextVersion('1.2.3', ['v1.2.2']), '1.2.4');
+  assert.equal(nextVersion('1.2.3', ['v1.2.2']), '1.2.3');
+  assert.equal(nextVersion('1.2.3', ['v1.2.3']), '1.2.4');
   assert.equal(parseVersion('v01.2.3'), null);
   assert.throws(() => nextVersion('invalid', []));
 });

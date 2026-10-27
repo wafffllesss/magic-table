@@ -13,7 +13,8 @@ export function compareVersions(a, b) {
 export function nextVersion(base, tags) {
   const start = parseVersion(base);
   if (!start) throw new Error(`Invalid base version: ${base}`);
-  const highest = tags.map(parseVersion).filter(Boolean).reduce((a, b) => compareVersions(a, b) >= 0 ? a : b, start);
+  const highest = tags.map(parseVersion).filter(Boolean).reduce((a, b) => !a || compareVersions(a, b) < 0 ? b : a, null);
+  if (!highest || compareVersions(start, highest) > 0) return start.join('.');
   return `${highest[0]}.${highest[1]}.${highest[2] + 1}`;
 }
 export function selectRelease(base, tags, releases, sha) {
