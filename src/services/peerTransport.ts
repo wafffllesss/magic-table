@@ -1,6 +1,6 @@
 import { ROOM_PACKET_BYTES, RoomPacketAssembler, decodeRoomEnvelope, roomEnvelope, splitRoomPacket } from './roomProtocol';
 
-export type PeerSignal = { roomId: string; senderUid: string; targetUid: string; generation: number; linkId?: string; incompatible?: boolean; relay?: 'request' | 'ready'; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
+export type PeerSignal = { roomId: string; senderUid: string; targetUid: string; generation: number; linkId?: string; incompatible?: boolean; reconnect?: boolean; relay?: 'request' | 'ready'; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
 export interface RoomSignalBus {
   send(signal: PeerSignal): Promise<void>;
   subscribe(receive: (signal: PeerSignal) => void): () => void;
@@ -33,6 +33,7 @@ export class PeerTransport extends EventTarget {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private closing = false;
   private offered = new Set<string>();
+  private announced = new Set<string>();
   private fallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private lastPresenceAt = new Map<string, number>();
   private presenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -56,6 +57,11 @@ export class PeerTransport extends EventTarget {
       this.signalQueues.set(signal.senderUid, next);
     });
     for (const uid of roster) {
+      if (this.selfUid === this.hostUid && uid !== this.selfUid && !this.announced.has(uid)) {
+        this.announced.add(uid);
+        try { await this.signalBus.send({ roomId: this.roomId, senderUid: this.selfUid, targetUid: uid, generation: this.generation, linkId: crypto.randomUUID(), reconnect: true }); }
+        catch (error) { this.announced.delete(uid); this.reportError(error); }
+      }
       if (uid === this.selfUid || this.selfUid === this.hostUid || uid !== this.hostUid || this.offered.has(uid)) continue;
       await this.prepareIceServers();
       this.offered.add(uid);
@@ -74,6 +80,7 @@ export class PeerTransport extends EventTarget {
     for (const timer of this.fallbackTimers.values()) clearTimeout(timer);
     this.fallbackTimers.clear();
     this.offered.clear();
+    this.announced.clear();
     this.signalQueues.clear();
     this.orphanCandidates.clear();
     if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -138,6 +145,7 @@ export class PeerTransport extends EventTarget {
     this.unsubscribeSignals?.();
     this.unsubscribeSignals = undefined;
     this.offered.clear();
+    this.announced.clear();
     for (const timer of this.fallbackTimers.values()) clearTimeout(timer);
     this.fallbackTimers.clear();
     for (const link of this.peers.values()) this.disposeLink(link);
@@ -153,7 +161,9 @@ export class PeerTransport extends EventTarget {
     this.bindChannel(link, link.reliable);
     this.bindChannel(link, link.ephemeral);
     const description = await link.pc.createOffer();
+    if (this.peers.get(uid) !== link) return;
     await link.pc.setLocalDescription(description);
+    if (this.peers.get(uid) !== link) return;
     await this.signalBus.send({ roomId: this.roomId, senderUid: this.selfUid, targetUid: uid, generation: this.generation, linkId: link.linkId, description });
     this.scheduleFallback(link, this.iceServers.length > 1 ? 15_000 : 8_000);
   }
@@ -162,6 +172,13 @@ export class PeerTransport extends EventTarget {
     if (this.closing || signal.roomId !== this.roomId || signal.targetUid !== this.selfUid || signal.generation !== this.generation || signal.senderUid === this.selfUid) return;
     if (!signal.linkId || signal.incompatible) {
       this.reportError(new Error('Um participante está usando uma versão incompatível do Meu Magic. Atualizem o aplicativo para a mesma versão e entrem novamente.'));
+      return;
+    }
+    if (signal.reconnect && this.selfUid !== this.hostUid && signal.senderUid === this.hostUid) {
+      const old = this.peers.get(signal.senderUid);
+      if (old) { this.peers.delete(signal.senderUid); this.disposeLink(old); }
+      this.offered.delete(signal.senderUid);
+      await this.start([signal.senderUid]);
       return;
     }
     let link = this.peers.get(signal.senderUid);

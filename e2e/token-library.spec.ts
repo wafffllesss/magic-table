@@ -25,6 +25,7 @@ test('selects a creature token from its type column on a narrow screen', async (
   const dialog = page.getByRole('dialog', { name: 'Escolha uma ficha de criatura.' });
   const input = dialog.getByRole('searchbox');
   await expect(input).toBeFocused();
+  await dialog.getByRole('checkbox', { name: 'Somente fichas do deck' }).uncheck();
   await expect(dialog.locator('.library-type-heading h3')).toHaveText(['Wolf']);
   const geometry = await dialog.evaluate(element => {
     const rect = element.getBoundingClientRect();
