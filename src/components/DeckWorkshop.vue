@@ -323,8 +323,15 @@ function deckColorLabel(deck: DeckDefinition): string {
 }
 function totalFor(entries: DeckEntry[]): number { return entries.reduce((count, entry) => count + entry.quantity, 0); }
 function commanderNames(deck?: DeckDefinition): string { return deck?.commanders.map(commander => deck.entries.find(entry => entry.cardId === commander)?.name).filter(Boolean).join(' e ') ?? ''; }
-function friendly(error: unknown): string { return errorMessageKey(error); }
-function problemText(problem: string): string { return problem.includes('.') ? t(problem) : localizeError(problem); }
+function friendly(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  const prefix = 'Cartas não encontradas no Scryfall: ';
+  return message.startsWith(prefix) ? `missing-cards:${message.slice(prefix.length)}` : errorMessageKey(error);
+}
+function problemText(problem: string): string {
+  if (problem.startsWith('missing-cards:')) return t('deck.missingCards', { names: problem.slice('missing-cards:'.length) });
+  return problem.includes('.') ? t(problem) : localizeError(problem);
+}
 function clearSuccess(): void { successEvent.value = undefined; }
 </script>
 
