@@ -417,7 +417,7 @@ body.has-target-mode .app-global-cursor{display:none!important}body.has-target-m
 .startup-update { display: grid; justify-items: center; gap: .8rem; padding: 1.2rem; border: 1px solid #4b694b; border-radius: 12px; background: #1b261b; }
 
 /* Recent activity and its shortcut guide share one bottom-left anchor. */
-.stage-info { position:absolute; z-index:15; left:16px; bottom:16px; width:min(300px,calc(100% - 32px)); display:flex; flex-direction:column; gap:10px; pointer-events:none; }
+.stage-info { position:absolute; z-index:10; left:16px; bottom:16px; width:min(300px,calc(100% - 32px)); display:flex; flex-direction:column; gap:10px; pointer-events:none; }
 .stage-info .stage-shortcuts { position:static; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; gap:5px; }
 .stage-shortcuts>div { display:flex; flex-direction:column; gap:5px; min-width:0; }
 .stage-shortcuts>div>span { display:flex; align-items:center; gap:3px; white-space:nowrap; }
