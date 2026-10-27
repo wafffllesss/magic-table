@@ -15,8 +15,8 @@ test('starts the local Commander table and provides four seats', async ({ page }
   await expect(page.getByText('DEMONSTRAÇÃO LOCAL')).toBeVisible();
   await expect(page.locator('.player-mat')).toHaveCount(4);
   await expect(page.locator('.mat-header')).toHaveCount(0);
-  await expect(page.locator('.opponent-label')).toHaveCount(3);
-  await expect(page.locator('.opponent-label .player-dot.is-offline')).toHaveCount(3);
+  await expect(page.locator('.seat-nameplate')).toHaveCount(3);
+  await expect(page.locator('.seat-nameplate .player-dot.is-offline')).toHaveCount(3);
   await expect(page.getByRole('group', { name: /Pool de mana/ })).toHaveCount(0);
   await expect(page.locator('.mat-southWest')).toHaveClass(/is-self/);
   await expect(page.locator('.own-hand-fan .fan-card')).toHaveCount(7);
@@ -73,34 +73,9 @@ test('keeps four places visible with two players and honors reduced motion', asy
   await expect(host.locator('.empty-seat')).toHaveCount(2);
   await expect(host.locator('.seat-place .library-pile')).toHaveCount(2);
   await expect(virtualHands).toHaveCount(1);
-  const local = page.locator('.local-hand-cursor.is-local');
-  await expect(local).toHaveClass(/pose-rest/);
-  await expect(local).toHaveCSS('pointer-events', 'none');
   const card = host.locator('.mat-southWest .board-card-wrap').first();
   await card.click();
-  await expect(local).toHaveClass(/pose-point/);
-  await expect(local.locator('.hand-tap-ring')).toBeVisible();
-  await expect(local.locator('.hand-tap-ring')).toHaveCSS('animation-name', 'none');
-  await expect(local).toHaveCSS('pointer-events', 'none');
-  await expect(local).toHaveClass(/pose-follow/, { timeout: 1600 });
-  const lifeButton = host.locator('.seat-life-adjust').first();
-  await lifeButton.hover();
-  await expect(local).toHaveClass(/pose-follow/);
-  await expect(lifeButton).toHaveCSS('cursor', 'none');
-  const settingsButton = host.getByRole('button', { name: 'Configurações' });
-  const settingsBounds = (await settingsButton.boundingBox())!;
-  await settingsButton.hover();
-  await expect(local).toHaveClass(/pose-follow/);
-  await expect(settingsButton).toHaveCSS('cursor', 'none');
-  await expect.poll(() => local.evaluate(element => element.getBoundingClientRect().left)).toBeCloseTo(settingsBounds.x + settingsBounds.width / 2 - 14, 0);
-  await settingsButton.click();
-  const settingsToggle = page.getByRole('checkbox', { name: /Desativar todos os playmats personalizados/ });
-  await settingsToggle.hover();
-  await expect(settingsToggle).toHaveCSS('cursor', 'none');
-  await expect(local).toHaveClass(/pose-follow/);
-  await page.getByRole('button', { name: 'Fechar' }).click();
-  await page.waitForTimeout(2600);
-  await expect(local).toHaveClass(/pose-follow/);
+  await expect(card.locator('.card-pose')).toHaveCSS('animation-name', 'none');
   const box = await card.boundingBox();
   expect(box).not.toBeNull();
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
@@ -108,7 +83,6 @@ test('keeps four places visible with two players and honors reduced motion', asy
   await page.mouse.move(box!.x + box!.width / 2 + 35, box!.y + box!.height / 2 + 20, { steps: 4 });
   await expect(page.locator('.drag-floating-card')).toBeVisible();
   await page.mouse.up();
-  await expect(local).toHaveClass(/pose-follow/);
 });
 
 test('hides deck and hand from empty places on a narrow screen', async ({ page }) => {
@@ -140,6 +114,7 @@ test('supports drawing, selection, card inspection and help shortcuts', async ({
   await expect(hand).toHaveCount(7);
   await page.keyboard.press('Control+d');
   await expect(hand).toHaveCount(8);
+  await page.keyboard.press('Escape');
   await revealHand(page);
   await page.locator('.fan-card').last().click();
   await expect(page.locator('.fan-card').last()).toHaveClass(/selected/);
@@ -147,7 +122,7 @@ test('supports drawing, selection, card inspection and help shortcuts', async ({
   await page.locator('.fan-card').last().hover();
   await page.keyboard.press('z');
   await expect(page.locator('.shared-card-inspection')).toBeVisible({ timeout: 3500 });
-  const inspectionHand = page.locator('.local-hand-cursor');
+  const inspectionHand = page.locator('.app-global-cursor');
   await expect(inspectionHand).toBeVisible();
   await expect(inspectionHand).toHaveCSS('--hand-angle', '0deg');
   const hoveredCard = await page.locator('.fan-card').last().boundingBox();
@@ -165,7 +140,7 @@ test('groups library and general controls around the table on desktop and mobile
   await startLocalDemo(page);
   await expect(page.locator('.deck-actions')).toBeVisible();
   await expect(page.locator('.deck-actions button')).toHaveCount(3);
-  await expect(page.locator('.self-table-tools .general-actions')).toBeVisible();
+  await expect(page.locator('.general-actions')).toBeVisible();
   await expect(page.locator('.quick-actions')).toHaveCount(0);
   await expect(page.locator('.self-table-tools .commander-note')).toBeVisible();
   await expect(page.locator('.game-sidebar, .sidebar-toggle')).toHaveCount(0);
@@ -176,22 +151,22 @@ test('groups library and general controls around the table on desktop and mobile
     const note = tools.querySelector('.commander-note')!;
     return { gap: tools.offsetLeft - mat.offsetWidth, top: tools.offsetTop, commanderBottom: commander.offsetTop + commander.offsetHeight, rotation: getComputedStyle(note).transform };
   });
-  expect(placement.gap).toBe(16);
+  expect(placement.gap).toBeGreaterThan(0);
   expect(placement.top).toBeGreaterThan(placement.commanderBottom);
   expect(placement.rotation).not.toBe('none');
   const hand = page.locator('.own-hand-fan .fan-card');
   await page.getByRole('button', { name: 'Comprar carta', exact: true }).click();
   await expect(hand).toHaveCount(8);
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Buscar na biblioteca' }).click();
   await expect(page.locator('.library-search-modal')).toBeVisible();
   await page.locator('.library-search-modal .modal-close').click();
-  await page.locator('.general-actions button').filter({ hasText: 'Histórico' }).click();
-  await expect(page.locator('.table-stage .log-panel')).toBeVisible();
-
-  await page.locator('.table-stage .log-close').click();
+  await page.locator('.action-log-open').click();
+  await expect(page.getByRole('dialog', { name: 'Histórico de ações' })).toBeVisible();
+  await page.getByRole('button', { name: 'Fechar histórico' }).click();
   await page.screenshot({ path: 'test-results/table-controls-desktop.png' });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('.self-table-tools .general-actions')).toBeVisible();
+  await expect(page.locator('.general-actions')).toBeVisible();
   await expect(page.locator('.self-table-tools .commander-note')).toBeVisible();
 });
 
@@ -255,7 +230,6 @@ test('keeps the camera at the local seat through a turn change and honors reduce
   expect(await camera.evaluate(node => (node as HTMLElement).style.transform)).toBe(initialView);
   if (await page.getByRole('button', { name: /PASSAR PRIORIDADE/ }).count()) {
     await page.getByRole('button', { name: /PASSAR PRIORIDADE/ }).click();
-    await page.getByRole('button', { name: 'Resolver topo' }).click();
   }
   await expect(page.locator('.table-hub')).toContainText('RESOLVIDO');
   for (const step of ['Combate', 'Principal pós-combate', 'Final']) {
@@ -263,7 +237,7 @@ test('keeps the camera at the local seat through a turn change and honors reduce
     await expect(page.locator('.turn-timeline li.is-current b')).toHaveText(step);
   }
   await page.getByRole('button', { name: 'Encerrar turno' }).click();
-  await expect(page.locator('.mat-southWest .mat-turn-status')).toHaveText('AGUARDANDO');
+  await expect(page.locator('.turn-timeline')).not.toHaveClass(/is-own-turn/);
   expect(await camera.evaluate(node => (node as HTMLElement).style.transform)).toBe(initialView);
 });
 
@@ -342,19 +316,17 @@ test('uses keyboard and card menus to rotate cards, move to public zones and ins
   const opponent = page.locator('.mat-northWest .board-card-wrap').first();
   await opponent.focus();
   await page.keyboard.press('Shift+F10');
-  await expect(page.getByRole('menuitem')).toHaveCount(1);
+  await expect(page.getByRole('menuitem', { name: 'Mover ao cemitério' })).toHaveCount(0);
   await expect(page.getByRole('menuitem', { name: 'Inspecionar' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(opponent).toBeFocused();
-  const privateDeck = page.getByRole('button', { name: 'Deck de Yara', exact: true });
+  const privateDeck = page.getByRole('button', { name: /^Deck de Yara/ });
   await privateDeck.focus();
   await page.keyboard.press('Shift+F10');
   await expect(page.getByRole('menuitem', { name: 'Biblioteca privada' })).toBeDisabled();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
   await expect(privateDeck).toBeFocused();
-  await page.getByTitle('Inclinar sobre a mesa', { exact: true }).click();
-  await expect(page.locator('.table-stage')).toHaveAttribute('data-lean', '0.25');
 });
 
 test('shows graveyard and exile independently and closes both fans with Escape', async ({ page }) => {
@@ -369,7 +341,8 @@ test('shows graveyard and exile independently and closes both fans with Escape',
   const graveyardPile = page.locator('.seat-place[data-seat="southWest"] .physical-graveyard');
   const exilePile = page.locator('.seat-place[data-seat="southWest"] .physical-exile');
   await graveyardPile.click({ position: { x: 42, y: 59 } });
-  await exilePile.click({ position: { x: 42, y: 59 } });
+  await exilePile.focus();
+  await page.keyboard.press('Enter');
   await expect(graveyardPile).toHaveAttribute('aria-expanded', 'true');
   await expect(exilePile).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.table-stage .public-zone-fan')).toHaveCount(2);

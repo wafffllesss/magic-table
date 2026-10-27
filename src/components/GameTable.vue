@@ -1685,6 +1685,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                 <div v-if="!cardsFor(seatAt(seatId)!, 'command').length" class="physical-zone empty-command" data-drop-zone="command" :data-seat="seatId" :class="{ 'is-drop-ready': dropReady('command', seatId), 'is-drop-hovered': dropHovered('command', seatId) }"><span class="empty-zone-mark">♛</span><span class="zone-caption">{{ t('table.commander').toUpperCase() }}</span></div>
               </div>
               <div v-if="seatId === props.seatId && isMine" class="general-actions" :aria-label="t('table.generalActions')">
+                <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing'" :title="t('table.createToken')" :aria-label="t('table.createToken')" @click.stop="tokenLibraryOpen = true"><span>＋</span><small>{{ t('table.createToken') }}</small></button>
                 <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing'" :title="t('table.concede')" @click.stop="concede"><span>⚑</span><small>{{ t('table.concede') }}</small></button>
               </div>
               <div v-if="seatId === props.seatId && isMine" class="self-table-tools" :aria-label="t('table.yourPlaymatControls')">
