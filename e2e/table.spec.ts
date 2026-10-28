@@ -22,6 +22,25 @@ test('starts the local Commander table and provides four seats', async ({ page }
   await expect(page.locator('.own-hand-fan .fan-card')).toHaveCount(7);
 });
 
+test('starts a table and updates targets without recursive reactive updates', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(String(error)));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await startLocalDemo(page);
+  await page.locator('.topbar-actions .icon-button[title="Visão geral"]').click();
+  const card = page.locator('.mat-southWest .board-card-wrap').first();
+  await card.click({ modifiers: ['Alt'] });
+  await expect(page.locator('.target-layer .target-outline')).toHaveCount(1);
+  const life = page.getByRole('region', { name: 'Vida de Lia', exact: true }).locator('.seat-life-value');
+  await page.getByRole('button', { name: 'Aumentar vida de Lia', exact: true }).click({ force: true });
+  await expect(life).toHaveText('41');
+  await expect(page.locator('.target-layer .target-outline')).toHaveCount(1);
+  await card.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Devolver à mão', exact: true }).click();
+  await expect(page.locator('.target-layer .target-outline')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test('shows five recent events and opens every retained log entry in an accessible dialog', async ({ page }) => {
   await startLocalDemo(page);
   const preview = page.locator('.action-log-preview');
@@ -334,7 +353,7 @@ test('uses keyboard and card menus to rotate cards, move to public zones and ins
   await expect(privateDeck).toBeFocused();
 });
 
-test('shows graveyard and exile independently and closes both fans with Escape', async ({ page }) => {
+test('opens only one public zone and closes it with Escape', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await startLocalDemo(page);
   const battlefieldCards = page.locator('.mat-southWest .board-card-wrap');
@@ -348,14 +367,42 @@ test('shows graveyard and exile independently and closes both fans with Escape',
   await graveyardPile.click({ position: { x: 42, y: 59 } });
   await exilePile.focus();
   await page.keyboard.press('Enter');
-  await expect(graveyardPile).toHaveAttribute('aria-expanded', 'true');
+  await expect(graveyardPile).toHaveAttribute('aria-expanded', 'false');
   await expect(exilePile).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('.table-stage .public-zone-fan')).toHaveCount(2);
-  await expect(page.locator('.fan-graveyard .public-zone-fan-card')).toHaveCount(1);
+  await expect(page.locator('.table-stage .public-zone-fan')).toHaveCount(1);
+  await expect(page.locator('.fan-graveyard')).toHaveCount(0);
   await expect(page.locator('.fan-exile .public-zone-fan-card')).toHaveCount(1);
   await page.keyboard.press('Escape');
   await expect(graveyardPile).toHaveAttribute('aria-expanded', 'false');
   await expect(exilePile).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('shows a pointer tooltip for visible table cards', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await startLocalDemo(page);
+  const card = page.locator('.mat-southWest .board-card-wrap').first();
+  const name = await card.getAttribute('aria-label');
+  const tile = card.locator('.card-tile');
+  await tile.dispatchEvent('pointermove', { pointerType: 'mouse', clientX: 300, clientY: 200 });
+  const tooltip = page.locator('.table-card-tooltip');
+  await expect(tooltip).toContainText(name!);
+  await expect(tooltip).toHaveCSS('pointer-events', 'none');
+  await page.locator('.table-stage').dispatchEvent('pointermove', { pointerType: 'mouse', clientX: 400, clientY: 200 });
+  await expect(tooltip).toHaveCount(0);
+});
+
+test('keeps pointer camera movement available with a public zone open', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await startLocalDemo(page);
+  await page.locator('.seat-place[data-seat="southWest"] .physical-graveyard').evaluate(node => (node as HTMLElement).click());
+  await expect(page.locator('.fan-graveyard')).toBeVisible();
+  const stage = page.locator('.table-stage');
+  const bounds = (await stage.boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  const camera = page.locator('.camera-scene');
+  const before = await camera.getAttribute('style');
+  await page.mouse.move(bounds.x + bounds.width * .8, bounds.y + bounds.height * .2);
+  await expect.poll(() => camera.getAttribute('style')).not.toBe(before);
 });
 
 test('opens own public zones to the side and searches any public zone', async ({ page }) => {

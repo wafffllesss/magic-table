@@ -7,8 +7,10 @@ export const ZONE_STEP = 136;
 export const FOV_LIMITS = { min: 25, max: 70 } as const;
 export const CAMERA_PITCH_LIMITS = { min: -18, max: 8 } as const;
 export function clampCameraPitch(pitch: number): number { return Math.max(CAMERA_PITCH_LIMITS.min, Math.min(CAMERA_PITCH_LIMITS.max, pitch)); }
-// Keep the field close to the mat edges while clearing the header and command row.
-export const CARD_AREA = { left: 10, top: 64, width: MAT_WIDTH - 20, height: MAT_HEIGHT - 74 } as const;
+// The visual battlefield starts just below the player information and command
+// row. Keep its interaction bounds aligned with that visible area so cards can
+// be placed near the top edge of the mat.
+export const CARD_AREA = { left: 10, top: 48, width: MAT_WIDTH - 20, height: MAT_HEIGHT - 58 } as const;
 
 export const SEAT_PLACEMENT = {
   northWest: { x: 1000, y: 260, angle: 180 },

@@ -1,4 +1,4 @@
-import type { DeckDefinition, GameAction, MatchState } from '../domain/game';
+import type { CardInstance, DeckDefinition, GameAction, MatchState } from '../domain/game';
 import { advanceTurn, applyAction, composeMatchState, eligibleSeats, newMatch, privateProjection, publicProjection } from '../domain/game';
 import { canRestoreHistory, restoreHistorySnapshot } from '../domain/history';
 import { handPresenceStale, isHandPose, isTableSeat, type HandPresence, type HandPresenceInput } from '../domain/tablePresence';
@@ -9,6 +9,7 @@ import { localRepository, type SavedRoomSession } from './storage';
 import type { RoomSnapshot, TableSeatId } from './firebaseRoom';
 import { chatText, validChatMessage, type ChatMessage } from '../domain/chat';
 import { validTargetIntent, validTargetMark, type TargetIntent, type TargetMark } from '../domain/tableTargets';
+import type { HandRevealRequest, HandRevealView } from '../domain/handReveal';
 
 type PeerRoomSnapshot = RoomSnapshot & { roomId: string; code: string; name: string; hostUid?: string; generation: number; selfRole?: 'player' | 'spectator'; connectionState: 'connecting' | 'synchronizing' | 'connected' | 'reconnecting' | 'transferring' | 'disconnected'; memberCount: number };
 type StateTransitionType = GameAction['type'] | 'UNDO' | 'REDO';
@@ -54,6 +55,12 @@ export class PeerRoom extends EventTarget {
   private snapshotWaiters = new Set<() => void>();
   private seenChat = new Set<string>();
   private seenTargets = new Set<string>();
+  private handRevealRequests = new Map<string, { request: HandRevealRequest; requesterUid: string; ownerUid: string; timer: ReturnType<typeof setTimeout> }>();
+  private activeHandReveals = new Map<TableSeatId, { requesterName: string }>();
+  private revealedHandCards = new Map<TableSeatId, CardInstance[]>();
+  private revealedHandSeats = new Set<TableSeatId>();
+  private pendingHandReveal?: HandRevealRequest;
+  private temporaryRevealedHandIds = new Set<string>();
 
   async waitForUpdate(afterRevision: number | null, afterConnectionState: PeerRoomSnapshot['connectionState'], timeoutMs: number): Promise<{ snapshot?: RoomSnapshot; timedOut: boolean }> {
     const changed = () => !this.snapshot || (this.snapshot.state?.revision ?? null) !== afterRevision || this.snapshot.connectionState !== afterConnectionState;
@@ -104,17 +111,25 @@ export class PeerRoom extends EventTarget {
     this.transport.addEventListener('connection-state', event => {
       void event;
       this.refreshConnectionState();
+      this.expireDisconnectedHandReveals();
       void this.reconcileDisconnectedPlayers();
       this.maybeStartMatch();
     });
     this.transport.addEventListener('peer-open', event => {
       const { peerUid } = (event as CustomEvent<{ peerUid: string }>).detail;
+      if (this.activeHandReveals.size || this.revealedHandSeats.size) {
+        this.activeHandReveals.clear(); this.revealedHandCards.clear();
+        for (const id of [...this.handRevealRequests.keys()]) void this.cancelHandRevealRequest(id);
+        if (this.isHost()) this.syncHandReveals();
+        else { this.temporaryRevealedHandIds.clear(); this.revealedHandSeats.clear(); this.dispatchEvent(new CustomEvent<HandRevealView[]>('hand-reveal-state', { detail: [] })); }
+      }
       this.refreshConnectionState();
       this.checkpointPeers.add(peerUid);
       void this.reconcileDisconnectedPlayers().then(() => this.maybeStartMatch()).then(() => this.flushCheckpoints()).catch(error => this.patchSnapshot({ lastError: friendly(error) }));
     });
     this.transport.addEventListener('authority-changed', event => {
       const change = (event as CustomEvent).detail as { hostUid: string; generation: number };
+      this.clearTemporaryHandReveals();
       this.patchSnapshot({ hostUid: change.hostUid, generation: change.generation, connectionState: 'transferring' });
     });
     this.transport.addEventListener('error', event => this.patchSnapshot({ lastError: (event as CustomEvent).detail instanceof Error ? (event as CustomEvent).detail.message : 'A conexão P2P falhou.' }));
@@ -126,6 +141,15 @@ export class PeerRoom extends EventTarget {
       this.member = members.find(candidate => candidate.uid === uid) ?? this.member;
       const hostUid = String(metadata.hostUid ?? room.hostUid ?? uid);
       const generation = Number(metadata.generation ?? room.generation);
+      if (this.isHost()) {
+        for (const [seatId] of this.activeHandReveals) {
+          const owner = this.members.find(candidate => candidate.seatId === seatId && candidate.role === 'player');
+          if (!owner || owner.uid !== uid && (!this.isOnline(owner.uid) || !this.transport?.connectedPeerUids.includes(owner.uid))) void this.endHandReveal(seatId);
+        }
+        for (const [id, pending] of this.handRevealRequests) {
+          if (![pending.requesterUid, pending.ownerUid].every(participant => participant === uid || this.isOnline(participant) && Boolean(this.transport?.connectedPeerUids.includes(participant)))) void this.cancelHandRevealRequest(id);
+        }
+      }
       if (hostUid !== this.snapshot?.hostUid || generation !== this.snapshot?.generation) {
         this.patchSnapshot({ hostUid, generation, connectionState: 'transferring' });
         this.transport?.setAuthority(hostUid, generation);
@@ -217,6 +241,7 @@ export class PeerRoom extends EventTarget {
         } catch (error) { this.rejectCommit(actionId, error instanceof Error ? error : new Error(friendly(error))); }
         await committed;
       }
+      await this.syncMyHandReveal();
       return this.localState;
     } catch (error) {
       this.publicState = this.confirmedPublicState ?? this.publicState;
@@ -252,6 +277,7 @@ export class PeerRoom extends EventTarget {
         catch (error) { this.rejectCommit(actionId, error instanceof Error ? error : new Error(friendly(error))); }
         await committed;
       }
+      await this.syncMyHandReveal();
       return this.localState;
     } catch (error) {
       this.publicState = this.confirmedPublicState ?? this.publicState;
@@ -271,6 +297,7 @@ export class PeerRoom extends EventTarget {
   }
 
   async leave(): Promise<void> {
+    if (this.member?.role === 'player' && this.member.seatId) await this.endOwnHandReveal().catch(() => {});
     if (this.isHost() && this.publicState) await this.transport?.sendHost('FINAL_CHECKPOINT', { state: this.publicState }, this.publicState.revision).catch(() => {});
     this.timers.forEach(clearInterval); this.timers = [];
     await this.closeTransport();
@@ -280,6 +307,7 @@ export class PeerRoom extends EventTarget {
   }
 
   async closeTransport(): Promise<void> {
+    this.clearTemporaryHandReveals();
     this.seenChat.clear();
     this.seenTargets.clear();
     this.checkpointPeers.clear();
@@ -314,14 +342,159 @@ export class PeerRoom extends EventTarget {
     this.dispatchEvent(new CustomEvent<ChatMessage>('chat-message', { detail: { ...chat, at: Date.now() } }));
   }
 
+  async requestHandReveal(ownerSeatId: TableSeatId): Promise<void> {
+    const requesterSeatId = this.member?.seatId;
+    if (!this.room || !this.transport || !this.publicState || !requesterSeatId || this.member?.role !== 'player' || !this.snapshot?.online || requesterSeatId === ownerSeatId || !this.publicState.seats.some(seat => seat.id === ownerSeatId && seat.status === 'playing')) throw new Error('Não foi possível pedir para revelar esta mão.');
+    const request: HandRevealRequest = { id: crypto.randomUUID(), matchId: this.publicState.id, requesterSeatId: requesterSeatId as TableSeatId, ownerSeatId, requesterName: this.publicState.seats.find(seat => seat.id === requesterSeatId)?.name ?? this.name };
+    if (this.isHost()) await this.acceptHandRevealRequest(this.backend.uid!, request);
+    else await this.transport.sendToHost('HAND_REVEAL_REQUEST', request, this.publicState.revision, request.id);
+  }
+
+  async respondHandReveal(requestId: string, accept: boolean): Promise<void> {
+    const request = this.pendingHandReveal;
+    if (!request || request.id !== requestId || request.ownerSeatId !== this.member?.seatId || this.member?.role !== 'player' || !this.transport || !this.publicState) return;
+    this.pendingHandReveal = undefined;
+    this.dispatchEvent(new CustomEvent('hand-reveal-prompt', { detail: undefined }));
+    const response = { requestId, matchId: request.matchId, ownerSeatId: request.ownerSeatId, accept };
+    if (this.isHost()) await this.finishHandRevealRequest(this.backend.uid!, response);
+    else await this.transport.sendToHost('HAND_REVEAL_RESPONSE', response, this.publicState.revision, requestId);
+    if (accept) await this.syncMyHandReveal(true);
+  }
+
+  async endOwnHandReveal(): Promise<void> {
+    const ownerSeatId = this.member?.seatId;
+    if (!ownerSeatId || this.member?.role !== 'player' || !this.transport || !this.publicState) return;
+    if (this.isHost()) await this.endHandReveal(ownerSeatId as TableSeatId);
+    else await this.transport.sendToHost('HAND_REVEAL_END', { matchId: this.publicState.id, ownerSeatId }, this.publicState.revision);
+  }
+
+  private async acceptHandRevealRequest(uid: string, request: HandRevealRequest): Promise<void> {
+    if (!this.isHost() || !this.publicState || request.matchId !== this.publicState.id || request.requesterSeatId === request.ownerSeatId ||
+        !this.publicState.seats.some(seat => seat.id === request.requesterSeatId && seat.status === 'playing') ||
+        !this.publicState.seats.some(seat => seat.id === request.ownerSeatId && seat.status === 'playing') ||
+        !this.members.some(member => member.uid === uid && member.seatId === request.requesterSeatId && member.role === 'player') ||
+        !/^[0-9a-f-]{36}$/i.test(request.id) || this.handRevealRequests.has(request.id) || this.activeHandReveals.has(request.ownerSeatId) ||
+        [...this.handRevealRequests.values()].some(pending => pending.request.ownerSeatId === request.ownerSeatId)) return;
+    const owner = this.members.find(member => member.seatId === request.ownerSeatId && member.role === 'player');
+    if (!owner || owner.uid !== this.backend.uid && (!this.isOnline(owner.uid) || !this.transport?.connectedPeerUids.includes(owner.uid))) return;
+    const timer = setTimeout(() => { void this.cancelHandRevealRequest(request.id); }, 30_000);
+    this.handRevealRequests.set(request.id, { request, requesterUid: uid, ownerUid: owner.uid, timer });
+    if (owner.uid === this.backend.uid) {
+      this.pendingHandReveal = request;
+      this.dispatchEvent(new CustomEvent<HandRevealRequest>('hand-reveal-prompt', { detail: request }));
+    } else await this.transport?.sendToPeer(owner.uid, 'HAND_REVEAL_PROMPT', request, this.publicState.revision, request.id);
+  }
+
+  private async finishHandRevealRequest(uid: string, response: { requestId: string; matchId: string; ownerSeatId: TableSeatId; accept: boolean }): Promise<void> {
+    if (!this.isHost() || !this.publicState || response.matchId !== this.publicState.id) return;
+    const pending = this.handRevealRequests.get(response.requestId);
+    if (!pending || pending.ownerUid !== uid || pending.request.ownerSeatId !== response.ownerSeatId || !this.members.some(member => member.uid === uid && member.seatId === response.ownerSeatId && member.role === 'player')) return;
+    clearTimeout(pending.timer);
+    this.handRevealRequests.delete(response.requestId);
+    if (response.accept) {
+      this.activeHandReveals.set(response.ownerSeatId, { requesterName: pending.request.requesterName });
+      this.syncHandReveals();
+    } else {
+      const result = { requestId: response.requestId, accepted: false, ownerName: this.publicState.seats.find(seat => seat.id === response.ownerSeatId)?.name ?? '' };
+      if (pending.requesterUid === this.backend.uid) this.dispatchEvent(new CustomEvent('hand-reveal-result', { detail: result }));
+      else await this.transport?.sendToPeer(pending.requesterUid, 'HAND_REVEAL_RESULT', result, this.publicState.revision, response.requestId);
+    }
+  }
+
+  private async cancelHandRevealRequest(requestId: string): Promise<void> {
+    const pending = this.handRevealRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.handRevealRequests.delete(requestId);
+    const result = { requestId, accepted: false, cancelled: true, ownerName: this.publicState?.seats.find(seat => seat.id === pending.request.ownerSeatId)?.name ?? '' };
+    if (pending.ownerUid === this.backend.uid) {
+      if (this.pendingHandReveal?.id === requestId) { this.pendingHandReveal = undefined; this.dispatchEvent(new CustomEvent('hand-reveal-prompt', { detail: undefined })); }
+    } else await this.transport?.sendToPeer(pending.ownerUid, 'HAND_REVEAL_CANCEL', { requestId }, this.publicState?.revision ?? 0, `cancel-${requestId}`).catch(() => {});
+    if (pending.requesterUid === this.backend.uid) this.dispatchEvent(new CustomEvent('hand-reveal-result', { detail: result }));
+    else await this.transport?.sendToPeer(pending.requesterUid, 'HAND_REVEAL_RESULT', result, this.publicState?.revision ?? 0, requestId).catch(() => {});
+  }
+
+  private async endHandReveal(ownerSeatId: TableSeatId): Promise<void> {
+    if (!this.isHost() || !this.activeHandReveals.delete(ownerSeatId)) return;
+    this.revealedHandCards.delete(ownerSeatId);
+    for (const [id, pending] of this.handRevealRequests) if (pending.request.ownerSeatId === ownerSeatId) await this.cancelHandRevealRequest(id);
+    this.syncHandReveals();
+  }
+
+  private syncHandReveals(): void {
+    if (!this.isHost() || !this.publicState || !this.localState) return;
+    if (this.publicState.phase === 'finished') {
+      this.activeHandReveals.clear(); this.revealedHandCards.clear();
+      for (const id of [...this.handRevealRequests.keys()]) void this.cancelHandRevealRequest(id);
+    }
+    const reveals: HandRevealView[] = [...this.activeHandReveals].flatMap(([ownerSeatId, reveal]) => {
+      const owner = this.localState!.seats.find(seat => seat.id === ownerSeatId);
+      if (!owner) return [];
+      const cards = owner.participantUid === this.backend.uid
+        ? owner.hand.flatMap(id => { const card = this.localState!.cards[id]; return card ? [structuredClone(card)] : []; })
+        : (this.revealedHandCards.get(ownerSeatId) ?? []).length === (this.publicState!.hiddenZones?.[ownerSeatId]?.hand ?? -1) ? this.revealedHandCards.get(ownerSeatId)! : [];
+      return [{ ownerSeatId, ownerName: owner.name, requesterName: reveal.requesterName, cards: structuredClone(cards) }];
+    });
+    this.receiveHandRevealSync({ matchId: this.publicState.id, reveals });
+    void this.transport?.sendHost('HAND_REVEAL_SYNC', { matchId: this.publicState.id, reveals }, this.publicState.revision).catch(() => {});
+  }
+
+  private receiveHandRevealSync(payload: { matchId: string; reveals: HandRevealView[] }): void {
+    if (!this.publicState || payload.matchId !== this.publicState.id || !Array.isArray(payload.reveals)) return;
+    const safe: HandRevealView[] = [];
+    const ids = new Set<string>();
+    for (const reveal of payload.reveals) {
+      const owner = this.publicState.seats.find(seat => seat.id === reveal.ownerSeatId);
+      if (!owner || typeof reveal.ownerName !== 'string' || typeof reveal.requesterName !== 'string' || !Array.isArray(reveal.cards)) continue;
+      const cards = reveal.cards.filter(card => card && card.ownerId === reveal.ownerSeatId && card.zone === 'hand' && typeof card.id === 'string' && !ids.has(card.id));
+      cards.forEach(card => ids.add(card.id));
+      safe.push({ ...reveal, cards: structuredClone(cards) });
+    }
+    this.temporaryRevealedHandIds = ids;
+    this.revealedHandSeats = new Set(safe.map(reveal => reveal.ownerSeatId));
+    this.dispatchEvent(new CustomEvent<HandRevealView[]>('hand-reveal-state', { detail: safe }));
+  }
+
+  private async syncMyHandReveal(force = false): Promise<void> {
+    const seatId = this.member?.seatId;
+    if (!seatId || this.member?.role !== 'player' || !force && !this.revealedHandSeats.has(seatId as TableSeatId) || !this.localState || !this.transport || !this.publicState) return;
+    const seat = this.localState.seats.find(candidate => candidate.id === seatId);
+    if (!seat) return;
+    const cards = seat.hand.flatMap(id => { const card = this.localState!.cards[id]; return card ? [structuredClone(card)] : []; });
+    if (this.isHost()) { this.revealedHandCards.set(seatId as TableSeatId, cards); this.syncHandReveals(); }
+    else await this.transport.sendToHost('HAND_REVEAL_OWNER_CARDS', { matchId: this.publicState.id, ownerSeatId: seatId, cards }, this.publicState.revision);
+  }
+
+  private clearTemporaryHandReveals(): void {
+    for (const pending of this.handRevealRequests.values()) clearTimeout(pending.timer);
+    this.handRevealRequests.clear();
+    this.activeHandReveals.clear();
+    this.revealedHandCards.clear();
+    this.revealedHandSeats.clear();
+    this.pendingHandReveal = undefined;
+    this.temporaryRevealedHandIds.clear();
+    this.dispatchEvent(new CustomEvent('hand-reveal-prompt', { detail: undefined }));
+    this.dispatchEvent(new CustomEvent('hand-reveal-state', { detail: [] }));
+  }
+
+  private expireDisconnectedHandReveals(): void {
+    if (!this.isHost() || !this.transport) return;
+    const connected = new Set(this.transport.connectedPeerUids);
+    for (const [seatId] of this.activeHandReveals) {
+      const owner = this.members.find(member => member.seatId === seatId && member.role === 'player');
+      if (!owner || owner.uid !== this.backend.uid && !connected.has(owner.uid)) void this.endHandReveal(seatId);
+    }
+    for (const [id, pending] of this.handRevealRequests) if (!connected.has(pending.ownerUid) && pending.ownerUid !== this.backend.uid || !connected.has(pending.requesterUid) && pending.requesterUid !== this.backend.uid) void this.cancelHandRevealRequest(id);
+  }
+
   async sendTarget(intent: TargetIntent): Promise<void> {
-    if (!this.room || !this.transport || !this.publicState || !this.member?.seatId || this.member.role !== 'player' || !this.snapshot?.online || !validTargetIntent(intent, this.publicState)) throw new Error('Não foi possível marcar este alvo.');
+    if (!this.room || !this.transport || !this.publicState || !this.member?.seatId || this.member.role !== 'player' || !this.snapshot?.online || !validTargetIntent(intent, this.publicState, this.temporaryRevealedHandIds)) throw new Error('Não foi possível marcar este alvo.');
     if (this.isHost()) await this.broadcastTarget(intent, this.backend.uid!, this.member.seatId as TableSeatId);
     else await this.transport.sendToHost('TARGET_SEND', intent, this.publicState.revision, intent.id);
   }
 
   private async broadcastTarget(intent: TargetIntent, uid: string, seatId: TableSeatId): Promise<void> {
-    if (!this.isHost() || !this.publicState || !validTargetIntent(intent, this.publicState) || this.seenTargets.has(intent.id)) return;
+    if (!this.isHost() || !this.publicState || !validTargetIntent(intent, this.publicState, this.temporaryRevealedHandIds) || this.seenTargets.has(intent.id)) return;
     if (!this.members.some(member => member.uid === uid && member.seatId === seatId && member.role === 'player')) return;
     const cleanRef = (reference: TargetIntent['target']): TargetIntent['target'] => reference.kind === 'card' ? { kind: 'card', cardId: reference.cardId } : { kind: 'player', seatId: reference.seatId };
     const common = { id: intent.id, matchId: intent.matchId, target: cleanRef(intent.target), uid, seatId, at: Date.now() };
@@ -339,6 +512,66 @@ export class PeerRoom extends EventTarget {
 
   private async onPeerMessage(detail: { message: Record<string, unknown>; peerUid: string; channel: string }): Promise<void> {
     const { message, peerUid, channel } = detail;
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_REQUEST' && this.isHost()) {
+      const member = this.members.find(candidate => candidate.uid === peerUid && candidate.role === 'player' && isTableSeat(candidate.seatId));
+      const payload = message.payload as Partial<HandRevealRequest> | null;
+      if (member && payload && typeof payload.id === 'string' && typeof payload.ownerSeatId === 'string' && isTableSeat(payload.ownerSeatId)) {
+        const requester = this.publicState?.seats.find(seat => seat.id === member.seatId);
+        await this.acceptHandRevealRequest(peerUid, { id: payload.id, matchId: String(payload.matchId ?? ''), requesterSeatId: member.seatId as TableSeatId, ownerSeatId: payload.ownerSeatId, requesterName: requester?.name ?? '' });
+      }
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_PROMPT' && peerUid === this.snapshot?.hostUid) {
+      const payload = message.payload as HandRevealRequest;
+      if (payload?.matchId === this.publicState?.id && payload.ownerSeatId === this.member?.seatId && this.member?.role === 'player' && /^[0-9a-f-]{36}$/i.test(payload.id)) {
+        this.pendingHandReveal = payload;
+        this.dispatchEvent(new CustomEvent<HandRevealRequest>('hand-reveal-prompt', { detail: payload }));
+      }
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_CANCEL' && peerUid === this.snapshot?.hostUid) {
+      const payload = message.payload as { requestId?: string } | null;
+      if (payload?.requestId && this.pendingHandReveal?.id === payload.requestId) {
+        this.pendingHandReveal = undefined;
+        this.dispatchEvent(new CustomEvent('hand-reveal-prompt', { detail: undefined }));
+      }
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_RESPONSE' && this.isHost()) {
+      const member = this.members.find(candidate => candidate.uid === peerUid && candidate.role === 'player' && isTableSeat(candidate.seatId));
+      const payload = message.payload as { requestId?: string; matchId?: string; ownerSeatId?: TableSeatId; accept?: boolean } | null;
+      if (member && payload && typeof payload.requestId === 'string' && typeof payload.accept === 'boolean') await this.finishHandRevealRequest(peerUid, { requestId: payload.requestId, matchId: String(payload.matchId ?? ''), ownerSeatId: member.seatId as TableSeatId, accept: payload.accept });
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_OWNER_CARDS' && this.isHost()) {
+      const member = this.members.find(candidate => candidate.uid === peerUid && candidate.role === 'player' && isTableSeat(candidate.seatId));
+      const payload = message.payload as { matchId?: string; ownerSeatId?: string; cards?: CardInstance[] } | null;
+      if (member && payload && payload.matchId === this.publicState?.id && payload.ownerSeatId === member.seatId && this.activeHandReveals.has(member.seatId as TableSeatId) && Array.isArray(payload.cards)) {
+        const ownerSeatId = member.seatId as TableSeatId;
+        const handCount = this.publicState!.hiddenZones?.[ownerSeatId]?.hand;
+        const cards = payload.cards.filter(card => card && card.ownerId === ownerSeatId && card.zone === 'hand' && typeof card.id === 'string');
+        if (cards.length === handCount && new Set(cards.map(card => card.id)).size === cards.length) {
+          this.revealedHandCards.set(member.seatId as TableSeatId, structuredClone(cards));
+          this.syncHandReveals();
+        }
+      }
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_END' && this.isHost()) {
+      const member = this.members.find(candidate => candidate.uid === peerUid && candidate.role === 'player' && isTableSeat(candidate.seatId));
+      const payload = message.payload as { matchId?: string; ownerSeatId?: string } | null;
+      if (member && payload && payload.matchId === this.publicState?.id && payload.ownerSeatId === member.seatId) await this.endHandReveal(member.seatId as TableSeatId);
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_SYNC' && peerUid === this.snapshot?.hostUid && !this.isHost()) {
+      const payload = message.payload as { matchId?: string; reveals?: HandRevealView[] } | null;
+      if (payload && payload.matchId === this.publicState?.id && Array.isArray(payload.reveals)) this.receiveHandRevealSync(payload as { matchId: string; reveals: HandRevealView[] });
+      return;
+    }
+    if (channel === 'room-state' && message.type === 'HAND_REVEAL_RESULT' && peerUid === this.snapshot?.hostUid) {
+      this.dispatchEvent(new CustomEvent('hand-reveal-result', { detail: message.payload }));
+      return;
+    }
     if (channel === 'table-presence') {
       if (message.type !== 'presence') return;
       if (this.isHost()) {
@@ -353,11 +586,11 @@ export class PeerRoom extends EventTarget {
     if (peerUid !== this.snapshot?.hostUid && !this.isHost()) return;
     if (message.type === 'TARGET_SEND' && this.isHost()) {
       const member = this.members.find(candidate => candidate.uid === peerUid && candidate.role === 'player' && isTableSeat(candidate.seatId));
-      if (member && this.publicState && validTargetIntent(message.payload, this.publicState)) await this.broadcastTarget(message.payload, peerUid, member.seatId as TableSeatId);
+      if (member && this.publicState && validTargetIntent(message.payload, this.publicState, this.temporaryRevealedHandIds)) await this.broadcastTarget(message.payload, peerUid, member.seatId as TableSeatId);
       return;
     }
     if (message.type === 'TARGET_BROADCAST') {
-      if (peerUid !== this.snapshot?.hostUid || !this.publicState || !validTargetMark(message.payload, this.publicState)) return;
+      if (peerUid !== this.snapshot?.hostUid || !this.publicState || !validTargetMark(message.payload, this.publicState, this.temporaryRevealedHandIds)) return;
       const mark = message.payload;
       if (this.members.some(member => member.uid === mark.uid && member.seatId === mark.seatId && member.role === 'player')) this.receiveTarget(mark);
       return;
@@ -654,6 +887,7 @@ export class PeerRoom extends EventTarget {
   private publishState(): void {
     if (!this.snapshot || !this.publicState) return;
     this.patchSnapshot({ state: this.localState, gameReady: true, connectionState: 'connected', lastError: undefined });
+    if (this.isHost()) this.syncHandReveals();
   }
 
   private async reconcileDisconnectedPlayers(): Promise<void> {
@@ -818,7 +1052,7 @@ function makePlaceholderDeck(seatId: string, name: string, summary: NonNullable<
   return { id: `seat-${seatId}`, name: name || 'Deck Commander', format: 'commander', commanders: commanders.map(entry => entry.cardId), entries: [...commanders, ...fillers], updatedAt: Date.now() };
 }
 
-const ACTION_TYPES = new Set<StateTransitionType>(['DRAW', 'MULLIGAN', 'KEEP_HAND', 'PLAY_LAND', 'REPOSITION_CARD', 'MOVE_CARD', 'TAP', 'SET_LIFE', 'CHANGE_COUNTER', 'ADJUST_COMMANDER_DAMAGE', 'COMMANDER_DAMAGE', 'FLIP_FACE', 'SET_FACE_DOWN', 'CAST', 'CAST_ABILITY', 'PASS_PRIORITY', 'RESOLVE_TOP', 'PHASE', 'ADVANCE_TURN', 'SHUFFLE', 'REVEAL', 'SEARCH_LIBRARY', 'CREATE_TOKEN', 'TRANSFER_CONTROL', 'CONCEDE', 'UNDO', 'REDO']);
+const ACTION_TYPES = new Set<StateTransitionType>(['OPEN_LIBRARY_REVEAL', 'CLOSE_LIBRARY_REVEAL', 'REVEAL_LIBRARY_TOP', 'MOVE_LIBRARY_REVEALED', 'DRAW', 'MULLIGAN', 'KEEP_HAND', 'PLAY_LAND', 'REPOSITION_CARD', 'MOVE_CARD', 'TAP', 'SET_LIFE', 'CHANGE_COUNTER', 'ADJUST_COMMANDER_DAMAGE', 'COMMANDER_DAMAGE', 'FLIP_FACE', 'SET_FACE_DOWN', 'CAST', 'CAST_ABILITY', 'PASS_PRIORITY', 'RESOLVE_TOP', 'PHASE', 'ADVANCE_TURN', 'SHUFFLE', 'REVEAL', 'SEARCH_LIBRARY', 'CREATE_TOKEN', 'TRANSFER_CONTROL', 'CONCEDE', 'UNDO', 'REDO']);
 
 function sanitizePublicState(value: MatchState): MatchState {
     if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.seats) || value.seats.length < 1 || value.seats.length > 4 || new Set(value.seats.map(seat => seat.id)).size !== value.seats.length || !value.cards || typeof value.cards !== 'object') throw new Error('O estado público da mesa é inválido.');
@@ -841,6 +1075,12 @@ function validateTransition(previous: MatchState, next: MatchState, actorUid: st
   if ((actionType === 'UNDO' || actionType === 'REDO') && (previous.log.at(-1)?.actorId !== seatId || next.log.at(-1)?.actorId !== seatId)) throw new Error('Só é possível desfazer ou refazer sua ação mais recente.');
   if (next.seats.some(seat => !previous.seats.some(prior => prior.id === seat.id && prior.name === seat.name))) throw new Error('A jogada alterou os participantes da mesa.');
   if (JSON.stringify(next.seats.map(seat => [seat.id, seat.participantUid])) !== JSON.stringify(previous.seats.map(seat => [seat.id, seat.participantUid])) || JSON.stringify(next.suspendedSeatIds ?? []) !== JSON.stringify(previous.suspendedSeatIds ?? []) || JSON.stringify(next.disconnectedSeatIds ?? []) !== JSON.stringify(previous.disconnectedSeatIds ?? []) || next.paused !== previous.paused) throw new Error('Somente o anfitrião pode alterar a participação e a conexão da partida.');
+  for (const seat of next.seats) {
+    const prior = previous.seats.find(item => item.id === seat.id)!;
+    const ids = seat.libraryRevealed ?? [];
+    if (seat.id !== seatId && (Boolean(seat.libraryRevealOpen) !== Boolean(prior.libraryRevealOpen) || JSON.stringify(ids) !== JSON.stringify(prior.libraryRevealed ?? []))) throw new Error('A jogada alterou as cartas reveladas de outro jogador.');
+    if (new Set(ids).size !== ids.length || ids.some(id => next.cards[id]?.ownerId !== seat.id || next.cards[id]?.zone !== 'revealed') || Object.values(next.cards).some(card => card.ownerId === seat.id && card.zone === 'revealed' && !ids.includes(card.id)) || (!seat.libraryRevealOpen && ids.length)) throw new Error('A área de revelação é inválida.');
+  }
   const before = previous.hiddenZones ?? {};
   const after = next.hiddenZones ?? {};
   for (const id of SEATS) {

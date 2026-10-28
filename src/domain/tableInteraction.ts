@@ -12,7 +12,7 @@ export function indicatedSeat(state: MatchState): string {
 
 export function cardMenuOptions(state: MatchState, cardId: string, seatId?: string, spectator = false, busy = false): TableMenuOption[] {
   const card = state.cards[cardId];
-  if (!card || card.zone === 'library' || card.zone === 'hand' && card.ownerId !== seatId && !card.revealed) return [];
+  if (!card || card.zone === 'library' || card.zone === 'hand' && card.ownerId !== seatId && !card.revealed && !card.temporaryReveal) return [];
   const isCommander = state.seats.some(seat => seat.id === card.ownerId && seat.commanderIds.includes(card.cardId));
   const options: TableMenuOption[] = card.card && !card.faceDown ? [{ id: 'inspect', label: 'Inspecionar' }] : [];
   const own = card.zone === 'battlefield' ? card.controllerId === seatId : card.ownerId === seatId;

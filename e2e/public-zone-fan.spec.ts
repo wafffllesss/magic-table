@@ -1,6 +1,7 @@
 import { expect, test } from './fixtures';
 
-test('fans use the visible felt and advance cards into edge stacks', async ({ page }) => {
+test('displays up to four columns and switches public zones', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
   await page.evaluate(async () => {
     const vueUrl = performance.getEntriesByType('resource').map(entry => entry.name).find(url => url.includes('/node_modules/.vite/deps/vue.js')) ?? '/node_modules/.vite/deps/vue.js';
@@ -21,37 +22,26 @@ test('fans use the visible felt and advance cards into edge stacks', async ({ pa
   const exile = page.locator('.table-stage .fan-exile');
   await page.locator('.seat-place[data-seat="southWest"] .physical-graveyard').evaluate(node => (node as HTMLElement).click());
   await expect(graveyard).toBeVisible();
-  await expect.poll(() => graveyard.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(280);
-  await expect(graveyard.locator('.public-zone-fan-stack.is-after')).toBeVisible();
-  await expect(graveyard.locator('.public-zone-fan-stack.is-before')).toHaveCount(0);
-  const firstCards = await graveyard.locator('.public-zone-fan-card').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-fan-card-index')));
-  expect(firstCards.length).toBeLessThan(50);
-  await graveyard.getByRole('button', { name: 'Mostrar próxima carta' }).click();
-  await expect(graveyard.locator('.public-zone-fan-stack.is-before')).toBeVisible();
-  expect(await graveyard.locator('.public-zone-fan-card').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-fan-card-index')))).not.toEqual(firstCards);
-  await graveyard.dispatchEvent('wheel', { deltaY: 100 });
-  await expect(graveyard.locator('.public-zone-fan-stack.is-before > b')).toHaveText('2');
-  await graveyard.dispatchEvent('wheel', { deltaY: -100 });
-  await expect(graveyard.locator('.public-zone-fan-stack.is-before > b')).toHaveText('1');
-  await graveyard.locator('.public-zone-fan-card').first().focus();
-  await page.keyboard.press('End');
-  await expect(graveyard.locator('.public-zone-fan-card[data-fan-card-index="49"]')).toBeFocused();
-  await page.keyboard.press('Home');
-  await expect(graveyard.locator('.public-zone-fan-card[data-fan-card-index="0"]')).toBeFocused();
-  await page.locator('.seat-place[data-seat="southWest"] .physical-exile').evaluate(node => (node as HTMLElement).click());
-  await expect(exile.locator('.public-zone-fan-card')).toHaveCount(2);
+  await expect(graveyard.locator('.public-zone-fan-card')).toHaveCount(50);
+  await expect(graveyard.locator('.public-zone-fan-grid')).toHaveCSS('grid-template-columns', /.+ .+ .+ .+/);
+  expect(await graveyard.evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);
+  const overlap = await graveyard.locator('.public-zone-fan-card').evaluateAll(nodes => {
+    const first = nodes[0].getBoundingClientRect(), second = nodes[1].getBoundingClientRect();
+    return second.top > first.top && second.top < first.bottom;
+  });
+  expect(overlap).toBe(true);
+  const offsets = await graveyard.locator('.public-zone-fan-card').evaluateAll(nodes => {
+    const first = nodes[0] as HTMLElement, nextColumn = nodes.find(node => (node as HTMLElement).style.gridColumn === '2') as HTMLElement;
+    return { first: Number(first.style.gridRow), next: Number(nextColumn.style.gridRow) };
+  });
+  expect(offsets.first).toBe(6);
+  expect(offsets.next).toBe(1);
+  const firstColumnCount = await graveyard.locator('.public-zone-fan-card').evaluateAll(nodes => nodes.filter(node => (node as HTMLElement).style.gridColumn === '1').length);
+  expect(firstColumnCount).toBe(10);
   await graveyard.locator('.public-zone-fan-card').first().evaluate(node => (node as HTMLElement).click());
   await expect(page.locator('.shared-card-inspection')).toBeVisible();
   await page.getByRole('button', { name: 'Fechar inspeção', exact: true }).click();
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator('.topbar-actions .icon-button').first().click();
-  await expect.poll(() => graveyard.evaluate(node => {
-    const fan = node.getBoundingClientRect();
-    const stage = node.closest('.table-stage')!.getBoundingClientRect();
-    return fan.left >= stage.left - 2 && fan.right <= stage.right + 2;
-  })).toBe(true);
-  const display = graveyard.locator('.public-zone-fan-display');
-  await display.dispatchEvent('pointerdown', { pointerType: 'touch', clientX: 220, clientY: 450 });
-  await display.dispatchEvent('pointerup', { pointerType: 'touch', clientX: 150, clientY: 450 });
-  await expect(graveyard.locator('.public-zone-fan-stack.is-before > b')).toHaveText('1');
+  await page.locator('.seat-place[data-seat="southWest"] .physical-exile').evaluate(node => (node as HTMLElement).click());
+  await expect(graveyard).toHaveCount(0);
+  await expect(exile.locator('.public-zone-fan-card')).toHaveCount(2);
 });

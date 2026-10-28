@@ -1,23 +1,24 @@
 import { clampCardPosition } from './tableView';
+import { battlefieldPosition } from './battlefieldLayout';
 
-export type Zone = 'library' | 'hand' | 'battlefield' | 'graveyard' | 'exile' | 'command' | 'stack';
-export type CardFace = { name: string; mana_cost: string; type_line: string; oracle_text: string; power?: string; toughness?: string; image_uris?: Record<string, string> };
+export type Zone = 'library' | 'revealed' | 'hand' | 'battlefield' | 'graveyard' | 'exile' | 'command' | 'stack';
+export type CardFace = { name: string; mana_cost: string; type_line: string; oracle_text: string; power?: string; toughness?: string; loyalty?: string; image_uris?: Record<string, string> };
 export type RelatedCard = { id: string; component: string; name: string; type_line: string; uri: string };
 export type CardDefinition = {
   id: string; oracle_id: string; name: string; printed_name?: string; layout: string;
   color_identity: string[]; keywords: string[]; mana_cost: string; type_line: string; oracle_text: string;
   image_uris?: Record<string, string>; card_faces?: CardFace[];
   all_parts?: RelatedCard[];
-  power?: string; toughness?: string;
+  power?: string; toughness?: string; loyalty?: string;
   legalities: Record<string, string>; scryfall_uri?: string;
 };
 export type DeckEntry = { cardId: string; name: string; quantity: number; role: 'commander' | 'library'; card?: CardDefinition };
 export type DeckDefinition = { id: string; name: string; format: 'commander'; commanders: string[]; entries: DeckEntry[]; updatedAt: number; source?: string;
   precon?: { setCode: string; edition: string; sourceUrl: string; version: number } };
-export type CardInstance = { id: string; ownerId: string; controllerId: string; cardId: string; zone: Zone; tapped: boolean; faceDown: boolean; isToken?: boolean; revealed?: boolean; face?: number; x: number; y: number; counters: Record<string, number>; card?: CardDefinition };
-export type StackItem = { id: string; sourceId: string; controllerId: string; name: string; kind: 'spell' | 'ability'; target?: string };
+export type CardInstance = { id: string; ownerId: string; controllerId: string; cardId: string; zone: Zone; tapped: boolean; faceDown: boolean; isToken?: boolean; revealed?: boolean; temporaryReveal?: boolean; face?: number; x: number; y: number; counters: Record<string, number>; card?: CardDefinition };
+export type StackItem = { id: string; sourceId: string; controllerId: string; name: string; kind: 'spell' | 'ability'; target?: string; battlefieldPosition?: { x?: number; y?: number } };
 export type CommanderRosterEntry = { id: string; cardId: string; name: string };
-export type PlayerSeat = { id: string; name: string; participantUid?: string; status: 'playing' | 'waiting' | 'eliminated'; commanderIds: string[]; commanderRoster?: CommanderRosterEntry[]; library: string[]; hand: string[]; mulligans: number; keptHand: boolean; life: number; poison: number; commanderCasts: Record<string, number>; commanderDamage: Record<string, number>; landPlays: number };
+export type PlayerSeat = { id: string; name: string; participantUid?: string; status: 'playing' | 'waiting' | 'eliminated'; commanderIds: string[]; commanderRoster?: CommanderRosterEntry[]; library: string[]; hand: string[]; libraryRevealOpen?: boolean; libraryRevealed?: string[]; mulligans: number; keptHand: boolean; life: number; poison: number; commanderCasts: Record<string, number>; commanderDamage: Record<string, number>; landPlays: number };
 export type GameLogEvent = { key: string; params?: Record<string, string | number>; source?: GameLogEvent };
 export type GameLogEntry = { id: string; actorId: string; message: string; event?: GameLogEvent; at: number; public: boolean };
 export type MatchState = { id: string; revision: number; lastActionId?: string; phase: 'lobby' | 'mulligan' | 'playing' | 'finished'; paused: boolean; activeSeatId: string; turn: number; step: string; seats: PlayerSeat[]; suspendedSeatIds?: string[]; disconnectedSeatIds?: string[]; cards: Record<string, CardInstance>; stack: StackItem[]; passes: string[]; log: GameLogEntry[]; updatedAt: number; hiddenZones?: Record<string, { hand: number; library: number; graveyard: number; exile: number }> };
@@ -42,8 +43,10 @@ export type GameAction =
   | { type: 'PHASE'; step: string }
   | { type: 'ADVANCE_TURN' }
   | { type: 'SHUFFLE' }
+  | { type: 'OPEN_LIBRARY_REVEAL' | 'CLOSE_LIBRARY_REVEAL' | 'REVEAL_LIBRARY_TOP' }
+  | { type: 'MOVE_LIBRARY_REVEALED'; cardIds: string[]; destination: 'top' | 'bottom' | 'hand' | 'graveyard' | 'exile'; close?: boolean }
   | { type: 'REVEAL'; cardIds: string[] }
-  | { type: 'SEARCH_LIBRARY'; cardIds: string[]; destination?: Exclude<Zone, 'library' | 'stack' | 'command'> }
+  | { type: 'SEARCH_LIBRARY'; cardIds: string[]; destination?: Exclude<Zone, 'library' | 'revealed' | 'stack' | 'command'> }
   | { type: 'CREATE_TOKEN'; card: CardDefinition; x?: number; y?: number }
   | { type: 'TRANSFER_CONTROL'; cardId: string; seatId: string }
   | { type: 'CONCEDE' };
@@ -54,7 +57,7 @@ function opaqueCardId(): string {
   return `card-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
 }
 export const ZONE_LABELS: Record<Zone, string> = {
-  library: 'Biblioteca', hand: 'Mão', battlefield: 'Campo', graveyard: 'Cemitério',
+  library: 'Biblioteca', revealed: 'Reveladas', hand: 'Mão', battlefield: 'Campo', graveyard: 'Cemitério',
   exile: 'Exílio', command: 'Zona de comando', stack: 'Pilha',
 };
 
@@ -202,6 +205,7 @@ export function composeMatchState(publicState: MatchState, seatId: string, priva
 
 function moveCard(state: MatchState, card: CardInstance, zone: Zone, actorId: string, x?: number, y?: number): string {
   const sourceZone = card.zone;
+  if (zone === 'revealed') throw new Error('Use a ação de revelar a biblioteca.');
   if ((sourceZone === 'hand' || sourceZone === 'library' || sourceZone === 'command') && card.ownerId !== actorId) throw new Error('Somente o proprietário pode mover uma carta oculta ou da zona de comando.');
   if (sourceZone === 'battlefield' && card.controllerId !== actorId) throw new Error('Somente quem controla esta permanente pode movê-la.');
   if ((sourceZone === 'graveyard' || sourceZone === 'exile') && card.ownerId !== actorId) throw new Error('Somente o proprietário pode mover esta carta entre zonas públicas.');
@@ -220,9 +224,12 @@ function moveCard(state: MatchState, card: CardInstance, zone: Zone, actorId: st
   const owner = getSeat(state, card.ownerId);
   if (sourceZone === 'hand') owner.hand = owner.hand.filter(id => id !== card.id);
   if (sourceZone === 'library') owner.library = owner.library.filter(id => id !== card.id);
+  if (sourceZone === 'revealed') { if (card.ownerId !== actorId) throw new Error('Somente o proprietário pode mover esta carta.'); owner.libraryRevealed = (owner.libraryRevealed ?? []).filter(id => id !== card.id); }
   if (zone === 'hand' && !owner.hand.includes(card.id)) owner.hand.push(card.id);
   if (zone === 'library' && !owner.library.includes(card.id)) owner.library.push(card.id);
-  card.zone = zone; card.tapped = false; card.revealed = false; card.x = x ?? card.x; card.y = y ?? card.y;
+  const position = zone === 'battlefield' && sourceZone !== 'battlefield'
+    ? battlefieldPosition({ ...card, controllerId: actorId }, Object.values(state.cards), x, y) : undefined;
+  card.zone = zone; card.tapped = false; card.revealed = false; card.x = position?.x ?? x ?? card.x; card.y = position?.y ?? y ?? card.y;
   if (zone === 'battlefield') card.controllerId = actorId;
   if (zone === 'command') card.controllerId = card.ownerId;
   if (zone === 'battlefield') Object.assign(card, clampCardPosition(card.x, card.y, card.tapped));
@@ -238,6 +245,7 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
   if (seat.status !== 'playing' || (current.suspendedSeatIds ?? []).includes(actorId)) throw new Error('Este participante não pode agir enquanto não estiver ativo.');
   let message = ''; let publicAction = true; let resolvedItemName: string | undefined;
   const movedCardName = action.type === 'MOVE_CARD' ? state.cards[action.cardId]?.card?.name ?? state.cards[action.cardId]?.cardId : undefined;
+  const movedCardSourceZone = action.type === 'MOVE_CARD' ? state.cards[action.cardId]?.zone : undefined;
   switch (action.type) {
     case 'MULLIGAN': {
       if (state.phase !== 'mulligan' || seat.keptHand) throw new Error('Este jogador não pode mulligar agora.');
@@ -273,7 +281,10 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
       message = `${seat.name} jogou ${card.card?.name ?? 'um terreno'}.`; break;
     }
     case 'MOVE_CARD': {
-      const card = getCard(state, action.cardId); moveCard(state, card, action.zone, actorId, action.x, action.y);
+      const card = getCard(state, action.cardId);
+      const commanderToBattlefield = card.zone === 'command' && action.zone === 'battlefield';
+      moveCard(state, card, action.zone, actorId, action.x, action.y);
+      if (commanderToBattlefield) seat.commanderCasts[card.cardId] = (seat.commanderCasts[card.cardId] ?? 0) + 1;
       message = `${seat.name} moveu ${card.card?.name ?? 'uma carta'} para ${ZONE_LABELS[action.zone]}.`; break;
     }
     case 'REPOSITION_CARD': {
@@ -294,7 +305,7 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
       target.life += action.amount; message = `${seat.name} ajustou a vida de ${target.name} em ${action.amount > 0 ? '+' : ''}${action.amount}.`; break;
     }
     case 'CHANGE_COUNTER': {
-      if (!Number.isFinite(action.amount) || Math.abs(action.amount) > 1000 || !/^[\w -]{1,24}$/.test(action.counter)) throw new Error('Marcador inválido.');
+      if (!Number.isFinite(action.amount) || Math.abs(action.amount) > 1000 || !/^[\w +\/\-]{1,24}$/.test(action.counter)) throw new Error('Marcador inválido.');
       if (action.cardId) {
         const permanent = getCard(state, action.cardId);
         if (permanent.controllerId !== actorId || permanent.zone !== 'battlefield') throw new Error('Escolha uma permanente controlada por você.');
@@ -354,7 +365,7 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
         seat.commanderCasts[card.cardId] = castCount + 1;
       }
       moveCard(state, card, 'stack', actorId, action.x, action.y);
-      state.stack.push({ id: `${state.id}-stack-${state.revision + 1}`, sourceId: card.id, controllerId: actorId, name: card.card?.name ?? 'Magia', kind: 'spell', target: action.target });
+      state.stack.push({ id: `${state.id}-stack-${state.revision + 1}`, sourceId: card.id, controllerId: actorId, name: card.card?.name ?? 'Magia', kind: 'spell', target: action.target, ...(action.x !== undefined || action.y !== undefined ? { battlefieldPosition: { ...(action.x !== undefined ? { x: action.x } : {}), ...(action.y !== undefined ? { y: action.y } : {}) } } : {}) });
       state.passes = []; message = `${seat.name} conjurou ${card.card?.name ?? 'uma magia'}.`; break;
     }
     case 'CAST_ABILITY': {
@@ -373,7 +384,7 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
         if (item.kind === 'spell' && spell) {
           spell.zone = spell.card && /\bInstant\b|\bSorcery\b/i.test(spell.card.type_line) ? 'graveyard' : 'battlefield';
           spell.tapped = false;
-          if (spell.zone === 'battlefield') Object.assign(spell, clampCardPosition(spell.x, spell.y));
+          if (spell.zone === 'battlefield') Object.assign(spell, battlefieldPosition(spell, Object.values(state.cards), item.battlefieldPosition?.x, item.battlefieldPosition?.y));
         }
         state.passes = [];
         if (!state.stack.length && !eligibleSeats(state).some(candidate => candidate.id === state.activeSeatId)) advanceTurn(state);
@@ -386,7 +397,7 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
       const activeSeats = eligibleSeats(state);
       if (!activeSeats.every(candidate => state.passes.includes(candidate.id))) throw new Error('Todos os jogadores ativos devem passar antes de resolver.');
       const item = state.stack.pop()!; const spell = state.cards[item.sourceId];
-      if (spell) { spell.zone = spell.card && /\bInstant\b|\bSorcery\b/i.test(spell.card.type_line) ? 'graveyard' : 'battlefield'; spell.tapped = false; if (spell.zone === 'battlefield') Object.assign(spell, clampCardPosition(spell.x, spell.y)); }
+      if (item.kind === 'spell' && spell) { spell.zone = spell.card && /\bInstant\b|\bSorcery\b/i.test(spell.card.type_line) ? 'graveyard' : 'battlefield'; spell.tapped = false; if (spell.zone === 'battlefield') Object.assign(spell, battlefieldPosition(spell, Object.values(state.cards), item.battlefieldPosition?.x, item.battlefieldPosition?.y)); }
       state.passes = [];
       if (!state.stack.length && !eligibleSeats(state).some(candidate => candidate.id === state.activeSeatId)) advanceTurn(state);
       message = `${seat.name} resolveu ${item.name}.`; break;
@@ -404,6 +415,26 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
       advanceTurn(state);
       message = `${seat.name} encerrou o turno. É a vez de ${getSeat(state, state.activeSeatId).name}.`; break;
     }
+    case 'OPEN_LIBRARY_REVEAL': seat.libraryRevealOpen = true; seat.libraryRevealed ??= []; message = `${seat.name} abriu a área de revelação.`; break;
+    case 'CLOSE_LIBRARY_REVEAL':
+      if ((seat.libraryRevealed ?? []).length) throw new Error('Mova as cartas reveladas antes de fechar.');
+      seat.libraryRevealOpen = false; message = `${seat.name} fechou a área de revelação.`; break;
+    case 'REVEAL_LIBRARY_TOP': {
+      if (!seat.libraryRevealOpen || !seat.library.length) throw new Error('Não há carta para revelar.');
+      const id = seat.library.shift()!; const card = getCard(state, id);
+      if (card.ownerId !== actorId || card.zone !== 'library') throw new Error('Carta inválida na biblioteca.');
+      card.zone = 'revealed'; card.revealed = true; (seat.libraryRevealed ??= []).push(id);
+      message = `${seat.name} revelou ${card.card?.name ?? 'uma carta'}.`; break;
+    }
+    case 'MOVE_LIBRARY_REVEALED': {
+      const ids = action.cardIds; const revealed = seat.libraryRevealed ?? [];
+      if (!seat.libraryRevealOpen || !ids.length || new Set(ids).size !== ids.length || ids.some(id => !revealed.includes(id) || state.cards[id]?.ownerId !== actorId || state.cards[id]?.zone !== 'revealed') || (action.close && ids.length !== revealed.length)) throw new Error('Escolha cartas reveladas válidas.');
+      if (!['top', 'bottom', 'hand', 'graveyard', 'exile'].includes(action.destination)) throw new Error('Destino inválido.');
+      for (const id of ids) moveCard(state, state.cards[id], action.destination === 'top' || action.destination === 'bottom' ? 'library' : action.destination, actorId);
+      if (action.destination === 'top') seat.library = [...ids, ...seat.library.filter(id => !ids.includes(id))];
+      if (action.close) seat.libraryRevealOpen = false;
+      message = `${seat.name} moveu ${ids.length} carta(s) revelada(s).`; break;
+    }
     case 'SHUFFLE': seat.library = shuffle(seat.library, random); message = `${seat.name} embaralhou sua biblioteca.`; break;
     case 'REVEAL': {
       if (action.cardIds.length < 1 || action.cardIds.length > 20 || action.cardIds.some(id => !seat.hand.includes(id))) throw new Error('Escolha de uma a vinte cartas da sua mão.');
@@ -413,12 +444,14 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
     case 'SEARCH_LIBRARY': {
       if (!action.cardIds.length || action.cardIds.length > 20 || action.cardIds.some(id => !seat.library.includes(id))) throw new Error('Escolha de uma a vinte cartas da sua própria biblioteca.');
       const destination = action.destination ?? 'hand';
+      if (!['hand', 'battlefield', 'graveyard', 'exile'].includes(destination)) throw new Error('Destino de busca inválido.');
       for (const id of action.cardIds) {
         seat.library = seat.library.filter(cardId => cardId !== id);
         if (destination === 'hand') seat.hand.push(id);
         const card = state.cards[id];
         if (!card || card.ownerId !== actorId) throw new Error('A biblioteca contém uma carta inválida.');
         card.zone = destination;
+        if (destination === 'battlefield') { card.controllerId = actorId; Object.assign(card, battlefieldPosition(card, Object.values(state.cards))); }
       }
       message = `${seat.name} procurou em sua biblioteca e escolheu ${action.cardIds.length} carta(s).`;
       break;
@@ -427,7 +460,9 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
       if (!action.card?.id || !action.card.name?.trim() || !action.card.type_line?.includes('Token') || !action.card.type_line.includes('Creature')) throw new Error('Escolha uma ficha de criatura válida.');
       const id = opaqueCardId();
       const definition = JSON.parse(JSON.stringify(action.card)) as CardDefinition;
-      state.cards[id] = { id, ownerId: actorId, controllerId: actorId, cardId: id, zone: 'battlefield', tapped: false, faceDown: false, isToken: true, x: action.x ?? 49, y: action.y ?? 45, counters: {}, card: definition };
+      const token: CardInstance = { id, ownerId: actorId, controllerId: actorId, cardId: id, zone: 'battlefield', tapped: false, faceDown: false, isToken: true, x: 49, y: 45, counters: {}, card: definition };
+      Object.assign(token, battlefieldPosition(token, Object.values(state.cards), action.x, action.y));
+      state.cards[id] = token;
       message = `${seat.name} criou a ficha ${state.cards[id].card!.name}.`; break;
     }
     case 'TRANSFER_CONTROL': {
@@ -437,7 +472,10 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
     case 'CONCEDE': seat.status = 'eliminated'; message = `${seat.name} concedeu a partida.`; if (state.seats.filter(candidate => candidate.status === 'playing').length <= 1) state.phase = 'finished'; break;
   }
   state.revision = current.revision + 1; state.updatedAt = now;
-  state.log.push({ id: `${state.id}-${state.revision}`, actorId, message, event: resolvedItemName ? { key: 'gameLog.resolve', params: { actor: seat.name, card: resolvedItemName } } : gameLogEvent(action, state, actorId, movedCardName), at: now, public: publicAction });
+  const logEvent = resolvedItemName ? { key: 'gameLog.resolve', params: { actor: seat.name, card: resolvedItemName } } : gameLogEvent(action, state, actorId, movedCardName);
+  if (logEvent && !(action.type === 'MOVE_CARD' && movedCardSourceZone === action.zone) && action.type !== 'REPOSITION_CARD') {
+    state.log.push({ id: `${state.id}-${state.revision}`, actorId, message, event: logEvent, at: now, public: publicAction });
+  }
   if (state.log.length > 160) state.log = state.log.slice(-160);
   return state;
 }
@@ -454,6 +492,7 @@ function gameLogEvent(action: GameAction, state: MatchState, actorId: string, mo
     case 'TAP': return { key: 'gameLog.tap', params: { actor, verb: state.cards[action.cardId]?.tapped ? 'table.tapped' : 'table.untapped', card: cardName(action.cardId) } };
     case 'SET_LIFE': return { key: 'gameLog.life', params: { actor, player: getSeat(state, action.seatId ?? actorId).name, amount: action.amount > 0 ? `+${action.amount}` : action.amount } };
     case 'CHANGE_COUNTER': return { key: 'gameLog.counter', params: { actor, counter: action.counter, amount: action.amount > 0 ? `+${action.amount}` : action.amount, target: action.cardId ? cardName(action.cardId) : getSeat(state, action.seatId ?? actorId).name } };
+    case 'ADJUST_COMMANDER_DAMAGE': return { key: 'gameLog.commanderDamageAdjustment', params: { actor, card: cardName(action.commanderCardId), amount: action.amount > 0 ? `+${action.amount}` : action.amount, total: getSeat(state, actorId).commanderDamage[state.cards[action.commanderCardId]?.cardId ?? ''] ?? 0 } };
     case 'COMMANDER_DAMAGE': return { key: 'gameLog.commanderDamage', params: { actor, amount: action.amount, player: getSeat(state, action.defenderId).name } };
     case 'CAST': return { key: 'gameLog.cast', params: { actor, card: cardName(action.cardId) } };
     case 'CAST_ABILITY': return { key: 'gameLog.ability', params: { actor, card: cardName(action.sourceId) } };
@@ -462,6 +501,10 @@ function gameLogEvent(action: GameAction, state: MatchState, actorId: string, mo
     case 'PHASE': return { key: 'gameLog.phase', params: { actor, step: `table.steps.${action.step}` } };
     case 'ADVANCE_TURN': return { key: 'gameLog.endTurn', params: { actor, player: state.seats.find(seat => seat.id === state.activeSeatId)?.name ?? actor } };
     case 'SHUFFLE': return { key: 'gameLog.shuffle', params: { actor } };
+    case 'REVEAL_LIBRARY_TOP': return { key: 'gameLog.reveal', params: { actor, cards: cardName(getSeat(state, actorId).libraryRevealed?.at(-1) ?? '') } };
+    case 'MOVE_LIBRARY_REVEALED': return { key: 'gameLog.revealedMove', params: { actor, count: action.cardIds.length, destination: `table.revealDestination.${action.destination}` } };
+    case 'OPEN_LIBRARY_REVEAL': return { key: 'gameLog.revealOpen', params: { actor } };
+    case 'CLOSE_LIBRARY_REVEAL': return { key: 'gameLog.revealClose', params: { actor } };
     case 'REVEAL': return { key: 'gameLog.reveal', params: { actor, cards: action.cardIds.map(cardName).join(', ') } };
     case 'SEARCH_LIBRARY': return { key: 'gameLog.search', params: { actor, count: action.cardIds.length } };
     case 'CREATE_TOKEN': return { key: 'gameLog.token', params: { actor, card: action.card.name } };

@@ -8,6 +8,7 @@ import { applyAction, composeMatchState, privateProjection, publicProjection, ty
 import { fixtureDecks } from '../../tests/fixtures/scryfall';
 import { publicGameUpdate } from './firebaseState';
 import { preconFixtureDecks } from '../../tests/fixtures/precons';
+import { validTargetIntent } from '../domain/tableTargets';
 
 vi.mock('./roomBackend', () => ({ roomBackend: { uid: 'guest', id: 'session' } }));
 
@@ -25,7 +26,65 @@ function session(): any {
   room.transport = { sendToHost: vi.fn(async () => {}), sendHost: vi.fn(async () => {}), sendToPeer: vi.fn(async () => {}), connectedPeerUids: ['a','b','c'] };
   return room;
 }
-afterEach(async () => { await localRepository.close(); });
+afterEach(async () => { vi.useRealTimers(); await localRepository.close(); });
+
+describe('temporary hand reveals', () => {
+  it('authenticates requests, shares cards only after acceptance, and validates hand targets temporarily', async () => {
+    const host = session();
+    host.snapshot = { ...host.snapshot, hostUid: 'guest', connectionState: 'connected' };
+    const requester = { uid: 'requester', role: 'player', seatId: 'northEast' };
+    const owner = { uid: 'owner', role: 'player', seatId: 'northWest' };
+    host.members = [{ uid: 'guest', role: 'player', seatId: 'southWest' }, requester, owner];
+    host.presence = { requester: { tab: { online: true } }, owner: { tab: { online: true } } };
+    host.transport.connectedPeerUids = ['requester', 'owner'];
+    const sentToPeer: Array<{ peerUid: string; type: string; payload: any }> = [];
+    host.transport.sendToPeer = vi.fn(async (peerUid: string, type: string, payload: any) => { sentToPeer.push({ peerUid, type, payload }); });
+    const matchId = host.publicState.id;
+    const requestId = crypto.randomUUID();
+
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'requester', message: { type: 'HAND_REVEAL_REQUEST', payload: { id: requestId, matchId, ownerSeatId: 'northWest', requesterSeatId: 'southWest' } } });
+    expect(sentToPeer[0]).toMatchObject({ peerUid: 'owner', type: 'HAND_REVEAL_PROMPT', payload: { id: requestId, requesterSeatId: 'northEast', ownerSeatId: 'northWest' } });
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'requester', message: { type: 'HAND_REVEAL_RESPONSE', payload: { requestId, matchId, ownerSeatId: 'northWest', accept: true } } });
+    expect(host.activeHandReveals.size).toBe(0);
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'owner', message: { type: 'HAND_REVEAL_RESPONSE', payload: { requestId, matchId, accept: true } } });
+    expect(host.activeHandReveals.has('northWest')).toBe(true);
+
+    const cards = Array.from({ length: host.publicState.hiddenZones.northWest.hand }, (_, index) => ({
+      id: `temporary-${index}`, ownerId: 'northWest', controllerId: 'northWest', cardId: `oracle-${index}`, zone: 'hand',
+      tapped: false, faceDown: false, x: 0, y: 0, counters: {}, card: { name: `Card ${index}`, type_line: 'Creature' },
+    }));
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'owner', message: { type: 'HAND_REVEAL_OWNER_CARDS', payload: { matchId, ownerSeatId: 'northWest', cards } } });
+    const target = { kind: 'card' as const, cardId: cards[0].id };
+    const intent = { id: crypto.randomUUID(), matchId, kind: 'highlight' as const, target };
+    expect(validTargetIntent(intent, host.publicState, host.temporaryRevealedHandIds)).toBe(true);
+    expect(host.publicState.cards[cards[0].id]).toBeUndefined();
+    await host.endHandReveal('northWest');
+    expect(validTargetIntent(intent, host.publicState, host.temporaryRevealedHandIds)).toBe(false);
+  });
+
+  it('sends a decline result to the requester and times out duplicate requests', async () => {
+    vi.useFakeTimers();
+    const host = session();
+    host.snapshot = { ...host.snapshot, hostUid: 'guest', connectionState: 'connected' };
+    host.members = [{ uid: 'guest', role: 'player', seatId: 'southWest' }, { uid: 'requester', role: 'player', seatId: 'northEast' }, { uid: 'owner', role: 'player', seatId: 'northWest' }];
+    host.presence = { requester: { tab: { online: true } }, owner: { tab: { online: true } } };
+    host.transport.connectedPeerUids = ['requester', 'owner'];
+    const sentToPeer: Array<{ peerUid: string; type: string; payload: any }> = [];
+    host.transport.sendToPeer = vi.fn(async (peerUid: string, type: string, payload: any) => { sentToPeer.push({ peerUid, type, payload }); });
+    const matchId = host.publicState.id;
+    const requestId = crypto.randomUUID();
+    const request = { id: requestId, matchId, ownerSeatId: 'northWest' };
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'requester', message: { type: 'HAND_REVEAL_REQUEST', payload: request } });
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'requester', message: { type: 'HAND_REVEAL_REQUEST', payload: { ...request, id: crypto.randomUUID() } } });
+    expect(sentToPeer.filter(item => item.type === 'HAND_REVEAL_PROMPT')).toHaveLength(1);
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'owner', message: { type: 'HAND_REVEAL_RESPONSE', payload: { requestId, matchId, accept: false } } });
+    expect(sentToPeer.at(-1)).toMatchObject({ peerUid: 'requester', type: 'HAND_REVEAL_RESULT', payload: { accepted: false } });
+    await host.onPeerMessage({ channel: 'room-state', peerUid: 'requester', message: { type: 'HAND_REVEAL_REQUEST', payload: { ...request, id: crypto.randomUUID() } } });
+    vi.advanceTimersByTime(30_001);
+    expect(host.handRevealRequests.size).toBe(0);
+    vi.useRealTimers();
+  });
+});
 
 describe('room chat', () => {
   it('lets the host validate and relay a player message to spectators, ignoring duplicates and spectator sends', async () => {

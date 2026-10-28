@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { useAppI18n } from '../i18n';
 import { CARD_SIZE } from '../domain/tableView';
 
-const props = defineProps<{ count: number; playerName: string }>();
+const props = defineProps<{ count: number; playerName: string; seatId: string }>();
 const { t } = useAppI18n();
 const quantity = computed(() => Math.max(0, Math.floor(props.count)));
 const cards = computed(() => Array.from({ length: quantity.value }, (_, index) => {
@@ -16,7 +16,7 @@ const cards = computed(() => Array.from({ length: quantity.value }, (_, index) =
 </script>
 
 <template>
-  <div class="opponent-hand" :class="{ 'is-empty': !quantity }" role="img" :aria-label="t('table.opponentHand', { name: playerName, count: quantity }, quantity)" :style="{ '--held-card-width': `${CARD_SIZE.width}px`, '--held-card-height': `${CARD_SIZE.height}px` }">
+  <div class="opponent-hand" :class="{ 'is-empty': !quantity }" :data-menu-hand-seat="seatId" role="img" :aria-label="t('table.opponentHand', { name: playerName, count: quantity }, quantity)" :style="{ '--held-card-width': `${CARD_SIZE.width}px`, '--held-card-height': `${CARD_SIZE.height}px` }">
     <div v-if="quantity" class="opponent-hand-cards" aria-hidden="true">
       <div class="opponent-hand-fan">
         <span v-for="(style, index) in cards" :key="index" class="opponent-hand-card" :style="style">

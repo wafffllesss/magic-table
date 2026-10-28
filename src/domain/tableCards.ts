@@ -9,7 +9,7 @@ export function indexTableCards(state: MatchState): { seats: Map<string, PlayerS
   for (const card of Object.values(state.cards)) {
     if (card.zone === 'battlefield' || card.zone === 'command') zones.get(card.controllerId)?.[card.zone].push(card);
     else if (card.zone === 'graveyard' || card.zone === 'exile') zones.get(card.ownerId)?.[card.zone].push(card);
-    if (card.revealed && card.zone === 'hand') revealed.push(card);
+    if (card.revealed && !card.temporaryReveal && card.zone === 'hand') revealed.push(card);
   }
   return { seats, zones, revealed: revealed.slice(-6) };
 }

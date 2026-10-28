@@ -14,6 +14,7 @@ const face = ref(0);
 const content = computed(() => active.value?.source.read());
 const definition = computed(() => content.value?.definition ?? content.value?.card?.card);
 const shownFace = computed(() => definition.value?.card_faces?.[face.value] ?? definition.value);
+const plusCounters = computed(() => content.value?.card?.counters?.['+1/+1'] ?? 0);
 const details = computed(() => active.value?.phase === 'details');
 const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
 const layout = computed(() => {
@@ -141,14 +142,17 @@ onBeforeUnmount(() => {
       <section ref="dialog" class="shared-inspection-dialog" :role="active.pinned ? 'dialog' : undefined" :aria-modal="active.pinned || undefined" :aria-label="t('inspection.label', { card: shownFace?.name ?? t('table.card') })" tabindex="-1">
         <div ref="art" class="shared-inspection-art" :style="artStyle" @pointerenter="enterCardInspection()" @pointerleave="leaveCardInspection()">
           <CardTile :definition="definition" :face="face" inspection :zoom-enabled="false" />
+          <span v-if="plusCounters > 0" class="shared-inspection-counter">+{{ plusCounters }}/+{{ plusCounters }}</span>
         </div>
         <div class="shared-inspection-copy" :style="copyStyle" :inert="!details" @pointerenter="enterCardInspection()" @pointerleave="leaveCardInspection()">
           <button class="shared-inspection-close" type="button" :aria-label="t('inspection.close')" @click="closeCardInspection()">×</button>
-          <span class="eyebrow">{{ shownFace?.type_line }}</span>
-          <h2>{{ shownFace?.name }}</h2>
-          <ManaText :text="shownFace?.mana_cost" />
+          <header class="shared-inspection-heading">
+            <h2>{{ shownFace?.name }}</h2>
+            <ManaText class="shared-inspection-mana" :text="shownFace?.mana_cost" />
+          </header>
+          <div class="shared-inspection-type">{{ shownFace?.type_line }}</div>
           <p><ManaText :text="shownFace?.oracle_text || t('inspection.unavailable')" /></p>
-          <strong v-if="shownFace?.power || shownFace?.toughness">{{ shownFace?.power ?? '—' }} / {{ shownFace?.toughness ?? '—' }}</strong>
+          <strong v-if="shownFace?.power || shownFace?.toughness || shownFace?.loyalty" class="shared-inspection-stats">{{ shownFace?.power || shownFace?.toughness ? `${shownFace?.power ?? '—'} / ${shownFace?.toughness ?? '—'}` : shownFace?.loyalty }}</strong>
           <div v-if="(definition?.card_faces?.length ?? 0) > 1" class="shared-inspection-faces"><button v-for="(item, index) in definition?.card_faces" :key="index" type="button" :aria-pressed="face === index" @click="face = index">{{ item.name }}</button></div>
           <small v-if="content?.quantity">{{ t('inspection.deckQuantity', { count: content.quantity }) }}</small>
           <small>{{ t('inspection.escapeClose') }}</small>
@@ -167,14 +171,20 @@ onBeforeUnmount(() => {
 .shared-card-inspection.is-pinned .shared-inspection-backdrop { pointer-events:auto; }
 .shared-inspection-dialog { position:absolute; inset:0; outline:none; pointer-events:none; }
 .shared-inspection-art { position:absolute; left:0; top:0; transform-origin:0 0; pointer-events:none; filter:drop-shadow(0 24px 38px #000a); }
+.shared-inspection-counter { position:absolute; left:50%; bottom:7%; transform:translateX(-50%); padding:5px 9px; border:1px solid #d5ef9a; border-radius:999px; background:#192718ed; color:#e7f6cf; box-shadow:0 3px 9px #000a; font:700 clamp(13px,1.25vw,18px) var(--mono); white-space:nowrap; }
 .shared-inspection-art .card-tile-fallback b { font-size:clamp(18px,2vw,28px); }
 .shared-inspection-art .card-tile-fallback small { font-size:clamp(12px,1.4vw,18px); }
 .shared-inspection-art .card-tile-fallback i { font-size:32px; }
 .shared-inspection-copy { position:absolute; padding:36px 20px 24px; border:1px solid #c1d4b52b; border-radius:12px; background:#111c17f5; color:#e8ece7; overflow:auto; visibility:hidden; opacity:0; transition:opacity 200ms, visibility 200ms; pointer-events:none; }
 .shared-card-inspection.has-details .shared-inspection-copy { user-select:none; -webkit-user-select:none; }
 .has-details .shared-inspection-copy { visibility:visible; opacity:1; pointer-events:auto; }
-.shared-inspection-copy h2 { margin:16px 0 12px; font:600 clamp(20px,2.2vw,32px)/1.15 var(--heading); }
-.shared-inspection-copy p { white-space:pre-line; font-size:14px; line-height:1.65; }
+.shared-inspection-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:0 0 12px; }
+.shared-inspection-copy h2 { min-width:0; margin:0; font:600 clamp(20px,2.2vw,32px)/1.15 var(--heading); }
+.shared-inspection-mana { flex:none; padding-top:3px; font-size:14px; }
+.shared-inspection-copy .mana-symbol { width:.6em !important; height:.6em !important; margin:0 .04em !important; vertical-align:-.12em !important; }
+.shared-inspection-type { margin:0 0 16px; color:#b9cca9; font:500 12px/1.45 var(--mono); }
+.shared-inspection-copy p { margin:0 0 18px; white-space:pre-line; font-size:14px; line-height:1.65; }
+.shared-inspection-stats { display:block; margin-top:20px; color:#e5f0dc; font:600 20px var(--mono); text-align:right; }
 .shared-inspection-copy small { display:block; margin-top:20px; color:#97aa9c; font:10px var(--mono); }
 .shared-inspection-close { position:absolute; right:8px; top:6px; width:30px; height:30px; border:0; background:none; font-size:24px; cursor:pointer; }
 .shared-inspection-faces { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }

@@ -16,10 +16,12 @@
   width: 82px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   pointer-events: auto;
   transform: translateZ(8px);
 }
+
+.deck-actions .deck-action { min-height: 24px; padding: 2px 6px; }
 
 .deck-action {
   min-height: 29px;
@@ -109,9 +111,7 @@
   overflow: visible;
   border: 1px solid #c9b68a;
   border-radius: 3px 8px 4px 6px;
-  background:
-    repeating-linear-gradient(transparent 0 24px, rgba(91, 110, 91, .13) 24px 25px),
-    linear-gradient(145deg, #e9dfc2, #d9cba7);
+  background: linear-gradient(145deg, #e9dfc2, #d9cba7);
   color: #28352c;
   box-shadow: 2px 4px 8px rgba(0, 0, 0, .25);
   transform: translateY(-50%) rotate(-.6deg);
@@ -249,8 +249,10 @@
   .deck-actions {
     right: calc(100% + 5px);
     width: 68px;
-    gap: 3px;
+    gap: 2px;
   }
+
+  .deck-actions .deck-action { min-height: 21px; padding: 1px 3px; }
 
   .deck-action {
     min-height: 24px;
@@ -297,3 +299,4 @@
 .settings-toggle small { color:#91a095; font-size:11px; line-height:1.45; }
 .settings-toggle input { width:20px; height:20px; flex:none; accent-color:var(--lime); }
 @media(max-width:700px) { .settings-toggle { align-items:flex-start; } .settings-toggle input { margin-top:2px; } }
+.table-stage.space-focus:focus { outline: none; }

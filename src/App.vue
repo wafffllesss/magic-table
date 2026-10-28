@@ -11,7 +11,7 @@ import AppCursor from './components/AppCursor.vue';
 import ChatComposer from './components/ChatComposer.vue';
 import AgentPromptDialog from './components/AgentPromptDialog.vue';
 import { visibleChat, type ChatMessage } from './domain/chat';
-import { TARGET_DURATION, targetReferenceValid, type TargetIntent, type TargetMark } from './domain/tableTargets';
+import { TARGET_DURATION, targetReferenceValid, validTargetIntent, type TargetIntent, type TargetMark } from './domain/tableTargets';
 import meuMagicLogo from './assets/meu-magic-logo.svg';
 import type { DeckDefinition, GameAction, MatchState } from './domain/game';
 import { applyAction } from './domain/game';
@@ -24,6 +24,7 @@ import { addStressObjects, startDemoMatch } from './services/demo';
 import { validPlaymatId } from './services/playmats';
 import { firebaseConnectionError } from './services/firebaseState';
 import type { HandPresence, HandPresenceInput } from './domain/tablePresence';
+import type { HandRevealRequest, HandRevealView } from './domain/handReveal';
 import { roomBackend, type JoinedRoom } from './services/roomBackend';
 import { peerRoom } from './services/peerRoom';
 import { RoomNotificationTracker, showSystemNotification } from './services/systemNotifications';
@@ -61,6 +62,24 @@ const localDecks = ref<DeckDefinition[]>([]);
 const selectedDeck = ref<DeckDefinition>();
 const state = ref<MatchState>();
 const handPresence = ref<HandPresence[]>([]);
+const handReveals = ref<HandRevealView[]>([]);
+const handRevealPrompt = ref<HandRevealRequest>();
+function visibleTableState(base: MatchState | undefined): MatchState | undefined {
+  if (!base || !handReveals.value.length) return base;
+  const next = structuredClone(base);
+  for (const reveal of handReveals.value) for (const card of reveal.cards) {
+    if (card.ownerId === reveal.ownerSeatId && card.zone === 'hand' && (!next.cards[card.id] || next.cards[card.id].zone === 'hand')) next.cards[card.id] = { ...structuredClone(card), temporaryReveal: true };
+  }
+  return next;
+}
+function withoutTemporaryHandReveals(value: MatchState): MatchState {
+  const next = structuredClone(value);
+  for (const [id, card] of Object.entries(next.cards)) if (card.temporaryReveal) {
+    delete card.temporaryReveal;
+    if (!room.value.state?.cards[id]) delete next.cards[id];
+  }
+  return next;
+}
 const chatMessages = ref<ChatMessage[]>([]);
 const targetMarks = ref<TargetMark[]>([]);
 const targetTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -76,19 +95,45 @@ function receiveTargetEvent(event: Event): void {
     targetTimers.delete(mark.id);
   }, TARGET_DURATION));
 }
+function receiveHandRevealState(event: Event): void {
+  handReveals.value = (event as CustomEvent<HandRevealView[]>).detail ?? [];
+  state.value = visibleTableState(room.value.state);
+}
+function receiveHandRevealPrompt(event: Event): void { handRevealPrompt.value = (event as CustomEvent<HandRevealRequest | undefined>).detail; }
+function receiveHandRevealResult(event: Event): void {
+  const result = (event as CustomEvent<{ accepted?: boolean; ownerName?: string; cancelled?: boolean }>).detail;
+  if (result && !result.accepted) notifyMessage(result.cancelled ? t('table.handRevealCancelled', { name: result.ownerName ?? '' }) : t('table.handRevealDeclined', { name: result.ownerName ?? '' }), false);
+}
+async function requestHandReveal(ownerSeatId: TableSeatId): Promise<void> {
+  try { await peerRoom.requestHandReveal(ownerSeatId); notifyMessage(t('table.handRevealRequested'), false); }
+  catch (error) { notifyError(error); }
+}
+async function respondHandReveal(requestId: string, accept: boolean): Promise<void> {
+  try { await peerRoom.respondHandReveal(requestId, accept); }
+  catch (error) { notifyError(error); }
+}
+async function endHandReveal(): Promise<void> {
+  try { await peerRoom.endOwnHandReveal(); }
+  catch (error) { notifyError(error); }
+}
 async function sendTarget(intent: TargetIntent): Promise<void> {
   if (!selfSeatId.value || !state.value) return;
   if (onlineMode.value) {
+    const visibleHands = new Set(handReveals.value.flatMap(reveal => reveal.cards.map(card => card.id)));
+    if (!validTargetIntent(intent, state.value, visibleHands)) return;
     try { await peerRoom.sendTarget(intent); } catch (error) { notifyError(error); }
   } else receiveTargetEvent(new CustomEvent('target-mark', { detail: { ...intent, uid: 'local', seatId: selfSeatId.value, at: Date.now() } }));
 }
 watch(() => state.value?.id, clearTargets);
-watch(() => targetMarks.value.map(mark => {
+watch([() => targetMarks.value.map(mark => {
   const reference = (value: typeof mark.target) => value.kind === 'card' ? state.value?.cards[value.cardId]?.zone ?? 'missing' : state.value?.seats.some(seat => seat.id === value.seatId) ? 'player' : 'missing';
   return reference(mark.target) + (mark.kind === 'arrow' ? reference(mark.origin) : '');
-}).join('|'), () => {
+}).join('|'), () => handReveals.value.map(reveal => reveal.cards.map(card => card.id).join(',')).join('|')], () => {
   const current = state.value;
-  if (current) targetMarks.value = targetMarks.value.filter(mark => targetReferenceValid(mark.target, current) && (mark.kind !== 'arrow' || targetReferenceValid(mark.origin, current)));
+  const visibleHands = new Set(handReveals.value.flatMap(reveal => reveal.cards.map(card => card.id)));
+  if (!current) return;
+  const validMarks = targetMarks.value.filter(mark => targetReferenceValid(mark.target, current, visibleHands) && (mark.kind !== 'arrow' || targetReferenceValid(mark.origin, current, visibleHands)));
+  if (validMarks.length !== targetMarks.value.length) targetMarks.value = validMarks;
 });
 const chatNow = ref(Date.now());
 const activeChat = computed(() => visibleChat(chatMessages.value, chatNow.value));
@@ -159,6 +204,9 @@ onMounted(async () => {
   }).catch(() => true) : Promise.resolve(false);
   peerRoom.addEventListener('chat-message', receiveChatEvent);
   peerRoom.addEventListener('target-mark', receiveTargetEvent);
+  peerRoom.addEventListener('hand-reveal-state', receiveHandRevealState);
+  peerRoom.addEventListener('hand-reveal-prompt', receiveHandRevealPrompt);
+  peerRoom.addEventListener('hand-reveal-result', receiveHandRevealResult);
   chatTicker = setInterval(() => { chatNow.value = Date.now(); if (chatMessages.value.length !== activeChat.value.length) chatMessages.value = activeChat.value; }, 500);
   removeInviteListener = window.meuMagicDesktop?.onInvite(code => {
     inviteCode.value = code;
@@ -196,6 +244,9 @@ onBeforeUnmount(() => {
   startupController.abort();
   peerRoom.removeEventListener('chat-message', receiveChatEvent);
   peerRoom.removeEventListener('target-mark', receiveTargetEvent);
+  peerRoom.removeEventListener('hand-reveal-state', receiveHandRevealState);
+  peerRoom.removeEventListener('hand-reveal-prompt', receiveHandRevealPrompt);
+  peerRoom.removeEventListener('hand-reveal-result', receiveHandRevealResult);
   clearTargets();
   if (chatTicker) clearInterval(chatTicker);
   localRepository.removeEventListener('persistence-unavailable', showStorageWarning);
@@ -231,7 +282,8 @@ function receiveRoom(next: RoomSnapshot): void {
     showSystemNotification(t('app.name'), t(`notifications.${event.type}`, 'name' in event ? { name: event.name } : {}));
   }
   room.value = next;
-  state.value = next.state;
+  if (!next.state) { handReveals.value = []; handRevealPrompt.value = undefined; }
+  state.value = visibleTableState(next.state);
   if (onlineMode.value) {
     const destination = next.state ? 'table' : 'lobby';
     if (page.value === 'workshop') workshopReturn.value = destination;
@@ -353,15 +405,17 @@ async function startDemo(): Promise<void> {
   finally { loading.value = false; }
 }
 async function performActions(actions: GameAction[]): Promise<void> {
-  if (!state.value || busy.value || !selfSeatId.value) return;
+  const actorSeatId = selfSeatId.value;
+  const currentState = state.value;
+  if (!currentState || busy.value || !actorSeatId) return;
   busy.value = true;
   try {
     for (const action of actions) {
-      const before = toRaw(state.value);
-      if (onlineMode.value) state.value = await peerRoom.act(action);
-      else state.value = applyAction(before, selfSeatId.value, action);
-      history.record(before, toRaw(state.value));
-      if (!onlineMode.value) room.value = { ...room.value, state: state.value };
+      const before = toRaw(state.value ?? currentState);
+      const next = onlineMode.value ? visibleTableState(await peerRoom.act(action))! : applyAction(before, actorSeatId, action);
+      state.value = next;
+      history.record(withoutTemporaryHandReveals(before), withoutTemporaryHandReveals(toRaw(next)));
+      if (!onlineMode.value) room.value = { ...room.value, state: next };
     }
   } catch (error) { notifyError(error); }
   finally { busy.value = false; }
@@ -378,7 +432,8 @@ async function redoLastAction(): Promise<void> { await restoreHistory(true); }
 async function restoreHistory(redo: boolean): Promise<void> {
   const current = state.value; const seatId = selfSeatId.value;
   if (!current || !seatId || busy.value) return;
-  const snapshot = history.target(redo, current.revision);
+  const historySnapshot = history.target(redo, current.revision);
+  const snapshot = historySnapshot ? withoutTemporaryHandReveals(historySnapshot) : undefined;
   if (!snapshot) return;
   busy.value = true;
   try {
@@ -472,7 +527,7 @@ function publishHandPresence(presence: HandPresenceInput): void {
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </DeckWorkshop>
 
-  <GameTable v-else-if="page === 'table' && state" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @hand-presence="publishHandPresence" @target="sendTarget" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
+  <GameTable v-else-if="page === 'table' && state" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :hand-reveals="handReveals" :hand-reveal-prompt="handRevealPrompt" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @hand-presence="publishHandPresence" @target="sendTarget" @request-hand-reveal="requestHandReveal" @respond-hand-reveal="respondHandReveal" @end-hand-reveal="endHandReveal" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </GameTable>
 

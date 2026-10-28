@@ -24,8 +24,10 @@ import TableContextMenu from './TableContextMenu.vue';
 import TableTutorial from './TableTutorial.vue';
 import { localRepository } from '../services/storage';
 import OpponentHand from './OpponentHand.vue';
+import RevealedHand from './RevealedHand.vue';
 import ChatBubbles from './ChatBubbles.vue';
 import type { ChatMessage } from '../domain/chat';
+import type { HandRevealRequest, HandRevealView } from '../domain/handReveal';
 import { CARD_AREA, CARD_SIZE, FOV_LIMITS, MAT_HEIGHT, MAT_WIDTH, TABLE_SIZE, ZONE_GAP, ZONE_STEP, clampCameraPitch, clampCardPosition, createTableView, projectPoint, screenToCardPosition, screenToMat, screenToTable, SEAT_PLACEMENT, type SeatPosition, type ViewMode } from '../domain/tableView';
 import { handPresenceStale } from '../domain/tablePresence';
 import { cardMenuOptions, indicatedSeat, type TableMenuOption } from '../domain/tableInteraction';
@@ -35,11 +37,32 @@ import type { CardDefinition } from '../domain/game';
 import { scryfall } from '../services/scryfall';
 import { formatGameLogEvent, useAppI18n } from '../i18n';
 
-const props = defineProps<{ state: MatchState; seatId?: TableSeatId; appVersion: string; updateAvailable?: boolean; playmatIds: Partial<Record<TableSeatId, string>>; customPlaymatsDisabled?: boolean; online: boolean; multiplayer?: boolean; roomCode?: string; spectator?: boolean; busy?: boolean; isHost?: boolean; onlineSeats?: Partial<Record<TableSeatId, { uid: string; online: boolean }>>; handPresence?: HandPresence[]; chatMessages?: ChatMessage[]; targetMarks?: TargetMark[] }>();
+const props = defineProps<{ state: MatchState; seatId?: TableSeatId; appVersion: string; updateAvailable?: boolean; playmatIds: Partial<Record<TableSeatId, string>>; customPlaymatsDisabled?: boolean; online: boolean; multiplayer?: boolean; roomCode?: string; spectator?: boolean; busy?: boolean; isHost?: boolean; onlineSeats?: Partial<Record<TableSeatId, { uid: string; online: boolean }>>; handPresence?: HandPresence[]; chatMessages?: ChatMessage[]; targetMarks?: TargetMark[]; handReveals?: HandRevealView[]; handRevealPrompt?: HandRevealRequest }>();
 const { t, locale } = useAppI18n();
-const emit = defineEmits<{ (event: 'open-update'): void; (event: 'actions', actions: GameAction[]): void; (event: 'set-playmat', id: string | undefined): void; (event: 'set-custom-playmats-disabled', disabled: boolean): void; (event: 'leave'): void; (event: 'copy-room-code'): void; (event: 'hand-presence', presence: HandPresenceInput): void; (event: 'target', target: TargetIntent): void; (event: 'continue-without', seatId: string): void; (event: 'undo'): void; (event: 'redo'): void }>();
+const emit = defineEmits<{ (event: 'open-update'): void; (event: 'actions', actions: GameAction[]): void; (event: 'set-playmat', id: string | undefined): void; (event: 'set-custom-playmats-disabled', disabled: boolean): void; (event: 'leave'): void; (event: 'copy-room-code'): void; (event: 'hand-presence', presence: HandPresenceInput): void; (event: 'target', target: TargetIntent): void; (event: 'continue-without', seatId: string): void; (event: 'undo'): void; (event: 'redo'): void; (event: 'request-hand-reveal', seatId: TableSeatId): void; (event: 'respond-hand-reveal', requestId: string, accept: boolean): void; (event: 'end-hand-reveal'): void }>();
 const seatOrder: TableSeatId[] = ['northWest', 'northEast', 'southEast', 'southWest'];
 const selfSeat = computed(() => props.state.seats.find(seat => seat.id === props.seatId));
+type RevealDestination = 'top' | 'bottom' | 'hand' | 'graveyard' | 'exile';
+const revealOrderPrompt = ref<{ destination: 'top' | 'bottom'; ids: string[]; close: boolean; choosing: boolean }>();
+const revealSinglePrompt = ref<string>();
+function revealedFor(seat: PlayerSeat): MatchState['cards'][string][] {
+  return (seat.libraryRevealed ?? []).flatMap(id => props.state.cards[id] ? [props.state.cards[id]] : []);
+}
+function moveRevealed(destination: RevealDestination, ids = [...(selfSeat.value?.libraryRevealed ?? [])], close = false): void {
+  if (!ids.length) { if (close) emitAction({ type: 'CLOSE_LIBRARY_REVEAL' }); return; }
+  if (destination === 'top' || destination === 'bottom') { revealOrderPrompt.value = { destination, ids, close, choosing: false }; return; }
+  emitAction({ type: 'MOVE_LIBRARY_REVEALED', cardIds: ids, destination, close });
+}
+function confirmRevealOrder(): void {
+  const prompt = revealOrderPrompt.value; if (!prompt) return;
+  emitAction({ type: 'MOVE_LIBRARY_REVEALED', cardIds: prompt.ids, destination: prompt.destination, close: prompt.close });
+  revealOrderPrompt.value = undefined;
+}
+function shiftRevealOrder(index: number, delta: number): void {
+  const ids = revealOrderPrompt.value?.ids; const next = index + delta;
+  if (!ids || next < 0 || next >= ids.length) return;
+  [ids[index], ids[next]] = [ids[next], ids[index]];
+}
 const activeSeats = computed(() => eligibleSeats(props.state));
 const disconnectedPlayers = computed(() => (props.state.disconnectedSeatIds ?? []).flatMap(id => {
   const seat = props.state.seats.find(candidate => candidate.id === id);
@@ -101,6 +124,9 @@ const cameraScene = ref<HTMLElement>();
 const stageSize = ref({ width: 1200, height: 800 });
 const cameraMode = ref<ViewMode>(props.seatId ? 'seat' : 'overview');
 const cameraFov = ref(55);
+let requestedFov = 55;
+let zoomFrame = 0;
+let zoomFrameAt = 0;
 const cameraLook = ref({ yaw: 0, pitch: 0, lean: 0 });
 const requestedLook = { yaw: 0, pitch: 0, lean: 0 };
 const reducedMotion = ref(false);
@@ -218,6 +244,7 @@ function canDropOn(zone: Zone | 'command', seatId?: string): boolean {
     && Boolean(props.state.seats.find(seat => seat.id === card.ownerId)?.commanderIds.includes(card.cardId))
     && (drag.zone === 'battlefield' ? card.controllerId === props.seatId : ['hand', 'graveyard', 'exile'].includes(drag.zone));
   if (zone === 'stack') return ['hand', 'command'].includes(drag.zone) && props.state.phase === 'playing';
+  if (zone === 'library') return drag.zone === 'revealed' && seatId === card.ownerId;
   if (zone === 'graveyard' || zone === 'exile' || zone === 'hand') return drag.zone !== zone && seatId === card.ownerId;
   return false;
 }
@@ -243,158 +270,32 @@ let handSequence = 0;
 const suppressClickId = ref('');
 let lastMousePoint: { x: number; y: number } | undefined;
 const touchLook = ref<{ x: number; y: number; yaw: number; pitch: number; lean: number }>();
-const openPublicZones = ref(new Set<string>());
-const publicZoneFanSides = ref(new Set<string>());
-const zoneFanPositions = ref<Record<string, { left: number; top: number; width: number; height: number; cardWidth: number; cardHeight: number; stackWidth: number }>>({});
-const zoneFanStarts = ref<Record<string, number>>({});
-const zoneFanWheel = new Map<string, number>();
-let zoneFanTouch: { key: string; x: number; y: number } | undefined;
+const openPublicZone = ref<string>();
 const zoneFanKey = (seatId: string, zone: 'graveyard' | 'exile'): string => `${seatId}:${zone}`;
-function zoneFanOpen(seatId: string, zone: 'graveyard' | 'exile'): boolean { return openPublicZones.value.has(zoneFanKey(seatId, zone)); }
-type PublicZone = 'graveyard' | 'exile';
-type ZoneFanLayout = { cards: MatchState['cards'][string][]; start: number; capacity: number; width: number; step: number; before: number; after: number; cardWidth: number; cardHeight: number; stackWidth: number };
-function zoneFanLayout(seatId: TableSeatId, zone: PublicZone): ZoneFanLayout {
+function zoneFanOpen(seatId: string, zone: 'graveyard' | 'exile'): boolean { return openPublicZone.value === zoneFanKey(seatId, zone); }
+function zoneColumns(count: number): number { return Math.min(4, Math.max(1, 1 + Math.ceil(Math.max(0, count - 10) / 15))); }
+function zoneRows(count: number): number { return Math.max(15, Math.ceil((count + 5) / zoneColumns(count))); }
+function zoneCardPosition(index: number, count: number): Record<string, number> {
+  const rows = zoneRows(count);
+  const firstColumnCount = rows - 5;
+  return index < firstColumnCount
+    ? { gridColumn: 1, gridRow: index + 6, zIndex: index + 1 }
+    : { gridColumn: 2 + Math.floor((index - firstColumnCount) / rows), gridRow: 1 + (index - firstColumnCount) % rows, zIndex: index + 1 };
+}
+function toggleZoneFan(seatId: TableSeatId, zone: 'graveyard' | 'exile', button: HTMLElement): void {
   const key = zoneFanKey(seatId, zone);
-  const seat = seatAt(seatId);
-  const cards = seat ? ownerCardsFor(seat, zone) : [];
-  const position = zoneFanPositions.value[key];
-  const width = position?.width ?? 280;
-  const cardWidth = position?.cardWidth ?? 56;
-  const cardHeight = position?.cardHeight ?? 79;
-  const stackWidth = position?.stackWidth ?? 40;
-  const openWidth = Math.max(1, width - 48 - 2 * (stackWidth + 10));
-  const capacity = Math.max(1, Math.floor((openWidth - cardWidth) / (cardWidth * .66)) + 1);
-  const start = Math.max(0, Math.min(zoneFanStarts.value[key] ?? 0, Math.max(0, cards.length - capacity)));
-  const visible = cards.slice(start, start + capacity);
-  const step = visible.length > 1 ? Math.min(cardWidth * .8, (openWidth - cardWidth) / (visible.length - 1)) : 0;
-  return { cards: visible, start, capacity, width, step, before: start, after: Math.max(0, cards.length - start - visible.length), cardWidth, cardHeight, stackWidth };
-}
-function zoneFanCardStyle(layout: ZoneFanLayout, index: number): Record<string, string | number> {
-  const middle = (layout.cards.length - 1) / 2;
-  return { '--fan-offset': `${(index - middle) * layout.step}px`, '--fan-angle': `${(index - middle) * Math.min(3, 12 / Math.max(1, layout.cards.length - 1))}deg`, '--fan-drop': `${Math.pow(Math.abs(index - middle) / Math.max(1, middle), 2) * 7}px`, 'z-index': index + 1 };
-}
-function zoneFanStyle(seatId: TableSeatId, zone: PublicZone): Record<string, string> {
-  const position = zoneFanPositions.value[zoneFanKey(seatId, zone)];
-  if (!position) return { left: '12px', top: '12px', width: '280px', height: '99px' };
-  return {
-    left: `${position.left}px`, top: `${position.top}px`, width: `${position.width}px`, height: `${position.height}px`,
-    '--fan-card-width': `${position.cardWidth}px`, '--fan-card-height': `${position.cardHeight}px`, '--fan-stack-width': `${position.stackWidth}px`,
-  };
-}
-function updateZoneFanGeometry(): void {
-  const stage = stageElement.value;
-  if (!openPublicZones.value.size || !stage) return;
-  const stageBounds = stage.getBoundingClientRect();
-  const tableCorners = [
-    projectPoint(cameraView.value, { x: 0, y: 0, z: 0 }),
-    projectPoint(cameraView.value, { x: TABLE_SIZE, y: 0, z: 0 }),
-    projectPoint(cameraView.value, { x: TABLE_SIZE, y: TABLE_SIZE, z: 0 }),
-    projectPoint(cameraView.value, { x: 0, y: TABLE_SIZE, z: 0 }),
-  ];
-  const positions = { ...zoneFanPositions.value };
-  const sides = new Set(publicZoneFanSides.value);
-  for (const key of openPublicZones.value) {
-    const [seatId, zone] = key.split(':') as [TableSeatId, PublicZone];
-    const pile = stage.querySelector<HTMLElement>(`.seat-place[data-seat="${CSS.escape(seatId)}"] .physical-${zone}`);
-    if (!pile) continue;
-    const pileBounds = pile.getBoundingClientRect();
-    const centerY = (pileBounds.top + pileBounds.bottom) / 2 - stageBounds.top;
-    const intersections: number[] = [];
-    for (let index = 0; index < tableCorners.length; index++) {
-      const first = tableCorners[index], second = tableCorners[(index + 1) % tableCorners.length];
-      if ((first.y <= centerY && second.y >= centerY) || (second.y <= centerY && first.y >= centerY)) {
-        const ratio = Math.abs(second.y - first.y) < .001 ? 0 : (centerY - first.y) / (second.y - first.y);
-        intersections.push(first.x + (second.x - first.x) * ratio);
-      }
-    }
-    const leftEdge = Math.max(12, Math.min(stageBounds.width - 12, Math.min(...(intersections.length ? intersections : [0, stageBounds.width])) + 12));
-    const rightEdge = Math.max(leftEdge + 1, Math.min(stageBounds.width - 12, Math.max(...(intersections.length ? intersections : [0, stageBounds.width])) - 12));
-    const gap = 40;
-    const leftWidth = Math.max(1, pileBounds.left - stageBounds.left - gap - leftEdge);
-    const rightWidth = Math.max(1, rightEdge - (pileBounds.right - stageBounds.left + gap));
-    const opensRight = rightWidth > leftWidth;
-    const width = opensRight ? rightWidth : leftWidth;
-    if (opensRight) sides.add(key); else sides.delete(key);
-    const scale = Math.max(.55, Math.min(1.05, pileBounds.height / CARD_SIZE.height * 1.45));
-    const cardWidth = CARD_SIZE.width * scale;
-    const cardHeight = CARD_SIZE.height * scale;
-    const height = cardHeight + 20;
-    const top = Math.max(8, Math.min(stageBounds.height - height - 8, centerY - height / 2));
-    positions[key] = { left: opensRight ? pileBounds.right - stageBounds.left + gap : leftEdge, top, width: Math.max(120, width), height, cardWidth, cardHeight, stackWidth: cardWidth * .62 };
-  }
-  zoneFanPositions.value = positions;
-  publicZoneFanSides.value = sides;
-}
-async function toggleZoneFan(seatId: TableSeatId, zone: 'graveyard' | 'exile', button: HTMLElement): Promise<void> {
-  const key = zoneFanKey(seatId, zone);
-  const next = new Set(openPublicZones.value);
-  if (next.has(key)) {
-    if (stageElement.value?.querySelector<HTMLElement>(`.public-zone-fan[data-zone-key="${CSS.escape(key)}"]`)?.contains(document.activeElement)) button.focus({ preventScroll: true });
-    next.delete(key);
-    const sides = new Set(publicZoneFanSides.value); sides.delete(key); publicZoneFanSides.value = sides;
-    zoneFanWheel.delete(key);
-  } else {
-    zoneFanStarts.value = { ...zoneFanStarts.value, [key]: 0 };
-    next.add(key);
-    openPublicZones.value = next;
-    await nextTick();
-    updateZoneFanGeometry();
-    return;
-  }
-  openPublicZones.value = next;
+  if (openPublicZone.value === key) {
+    if (button.closest('.zone-pile-wrap')?.querySelector('.public-zone-fan')?.contains(document.activeElement)) button.focus({ preventScroll: true });
+    openPublicZone.value = undefined;
+  } else openPublicZone.value = key;
 }
 function closeZoneFans(): void {
-  if (!openPublicZones.value.size) return;
   const focusedFan = document.activeElement instanceof HTMLElement ? document.activeElement.closest<HTMLElement>('.public-zone-fan') : null;
-  const opener = focusedFan?.dataset.zoneKey
-    ? [...(stageElement.value?.querySelectorAll<HTMLElement>('.zone-pile-wrap') ?? [])].find(pile => pile.dataset.zoneKey === focusedFan.dataset.zoneKey)?.querySelector<HTMLElement>('.public-zone-toggle')
-    : undefined;
-  openPublicZones.value = new Set();
-  publicZoneFanSides.value = new Set();
-  zoneFanWheel.clear();
-  zoneFanTouch = undefined;
+  const opener = focusedFan?.closest('.zone-pile-wrap')?.querySelector<HTMLElement>('.public-zone-toggle');
+  openPublicZone.value = undefined;
   opener?.focus({ preventScroll: true });
 }
-function advanceZoneFan(seatId: TableSeatId, zone: PublicZone, direction: -1 | 1): void {
-  const key = zoneFanKey(seatId, zone);
-  const layout = zoneFanLayout(seatId, zone);
-  const total = ownerCardsFor(seatAt(seatId)!, zone).length;
-  const next = Math.max(0, Math.min(total - layout.capacity, layout.start + direction));
-  if (next !== layout.start) zoneFanStarts.value = { ...zoneFanStarts.value, [key]: next };
-}
-function wheelZoneFan(event: WheelEvent, seatId: TableSeatId, zone: PublicZone): void {
-  const key = zoneFanKey(seatId, zone);
-  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-  const amount = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? delta * 24 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? delta * 120 : delta;
-  const accumulated = (zoneFanWheel.get(key) ?? 0) + amount;
-  if (Math.abs(accumulated) < 36) { zoneFanWheel.set(key, accumulated); return; }
-  zoneFanWheel.set(key, 0);
-  advanceZoneFan(seatId, zone, accumulated > 0 ? 1 : -1);
-}
-function startZoneFanTouch(event: PointerEvent, key: string): void {
-  if (event.pointerType === 'touch' && !(event.target as Element).closest('button')) zoneFanTouch = { key, x: event.clientX, y: event.clientY };
-}
-function endZoneFanTouch(event: PointerEvent, seatId: TableSeatId, zone: PublicZone): void {
-  const touch = zoneFanTouch;
-  zoneFanTouch = undefined;
-  if (!touch || touch.key !== zoneFanKey(seatId, zone) || Math.abs(event.clientX - touch.x) < 30 || Math.abs(event.clientX - touch.x) < Math.abs(event.clientY - touch.y)) return;
-  advanceZoneFan(seatId, zone, event.clientX < touch.x ? 1 : -1);
-}
-async function navigateZoneFan(event: KeyboardEvent, seatId: TableSeatId, zone: PublicZone): Promise<void> {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
-  const layout = zoneFanLayout(seatId, zone);
-  const total = ownerCardsFor(seatAt(seatId)!, zone).length;
-  if (!total) return;
-  event.preventDefault();
-  const fan = (event.currentTarget as HTMLElement).closest('.public-zone-fan');
-  const index = Number((event.currentTarget as HTMLElement).dataset.fanCardIndex);
-  const next = event.key === 'Home' ? 0 : event.key === 'End' ? total - 1 : Math.max(0, Math.min(total - 1, index + (event.key === 'ArrowRight' ? 1 : -1)));
-  const start = Math.min(Math.max(layout.start, next - layout.capacity + 1), next);
-  zoneFanStarts.value = { ...zoneFanStarts.value, [zoneFanKey(seatId, zone)]: start };
-  await nextTick();
-  fan?.querySelector<HTMLButtonElement>(`.public-zone-fan-card[data-fan-card-index="${next}"]`)?.focus({ preventScroll: true });
-}
-type MenuTarget = { kind: 'card'; cardId: string } | { kind: 'player'; seatId: TableSeatId } | { kind: 'deck'; seatId: string } | { kind: 'background' };
+type MenuTarget = { kind: 'card'; cardId: string } | { kind: 'player'; seatId: TableSeatId } | { kind: 'hand'; seatId: TableSeatId } | { kind: 'deck'; seatId: string } | { kind: 'background' };
 const contextMenu = ref<{ x: number; y: number; target: MenuTarget }>();
 provide(inspectionDisabledKey, computed(() => Boolean(contextMenu.value || dragCard.value || showTutorial.value)));
 let menuOpener: HTMLElement | undefined;
@@ -581,6 +482,7 @@ const handKeyboardFocus = ref(false);
 const handWindowActive = ref(true);
 const localCursorVisible = ref(true);
 let keyboardInput = false;
+const stageSpaceFocus = ref(false);
 let revealTouchPointer: number | undefined;
 let revealTouchClickPointer: number | undefined;
 let revealTouchClickTimer: ReturnType<typeof setTimeout> | undefined;
@@ -655,6 +557,8 @@ const targetPreview = computed(() => {
   return origin && point && props.seatId ? { origin, ...point, seatId: props.seatId } : undefined;
 });
 const targetAnnouncement = ref('');
+const revealedHandIds = computed(() => new Set((props.handReveals ?? []).flatMap(reveal => reveal.cards.map(card => card.id))));
+function validTableTarget(value: unknown): value is TargetReference { return targetReferenceValid(value, props.state, revealedHandIds.value); }
 function targetName(reference: TargetReference): string {
   if (reference.kind === 'player') return t('table.lifeOf', { name: props.state.seats.find(seat => seat.id === reference.seatId)?.name ?? '' });
   const card = props.state.cards[reference.cardId];
@@ -677,13 +581,13 @@ function targetAt(element: Element | null): TargetReference | undefined {
   const cardId = element.closest<HTMLElement>('[data-menu-card]')?.dataset.menuCard;
   if (cardId) {
     const reference: TargetReference = { kind: 'card', cardId };
-    return targetReferenceValid(reference, props.state) ? reference : undefined;
+    return validTableTarget(reference) ? reference : undefined;
   }
   const seatId = element.closest<HTMLElement>('.seat-life-panel')?.closest<HTMLElement>('.seat-place')?.dataset.seat as TableSeatId | undefined;
-  if (seatId) { const reference: TargetReference = { kind: 'player', seatId }; if (targetReferenceValid(reference, props.state)) return reference; }
+  if (seatId) { const reference: TargetReference = { kind: 'player', seatId }; if (validTableTarget(reference)) return reference; }
 }
 function publishTarget(target: TargetReference, origin?: TargetReference & { kind: 'card' }): void {
-  if (!isMine.value || !targetReferenceValid(target, props.state) || (origin && (!targetReferenceValid(origin, props.state) || target.kind === 'card' && target.cardId === origin.cardId))) return;
+  if (!isMine.value || !validTableTarget(target) || (origin && (!validTableTarget(origin) || target.kind === 'card' && target.cardId === origin.cardId))) return;
   const common = { id: crypto.randomUUID(), matchId: props.state.id, target };
   emit('target', origin ? { ...common, kind: 'arrow', origin } : { ...common, kind: 'highlight' });
 }
@@ -926,6 +830,10 @@ function tapCard(id: string): void {
   const option = cardMenuOptions(props.state, id, props.seatId, props.spectator, props.busy).find(item => item.id === 'tap');
   if (option?.action && !option.disabled) emitAction(option.action);
 }
+function adjustCardCounter(id: string, amount: number): void {
+  const option = cardMenuOptions(props.state, id, props.seatId, props.spectator, props.busy).find(item => item.id === 'counter');
+  if (option?.action?.type === 'CHANGE_COUNTER' && !option.disabled) emitAction({ ...option.action, amount });
+}
 function hoveredBattlefieldCard(): string | undefined {
   if (!lastMousePoint) return;
   const target = document.elementFromPoint(lastMousePoint.x, lastMousePoint.y);
@@ -1016,7 +924,7 @@ function handTargetAllowed(target: EventTarget | null): target is Element {
   if (!(target instanceof Element) || !target.closest('.table-stage') || inspectionOpen.value || contextMenu.value || showHelp.value || searchOpen.value || showPlaymats.value) return false;
   if (target.closest('.game-sidebar,.table-topbar,.modal-scrim,.inspection-overlay,.seat-life-panel,.stage-shortcuts,.table-context-menu')) return false;
   const button = target.closest('button');
-  return !button || Boolean(button.closest('.fan-card,.physical-zone,.public-zone-fan-card,.zone-fan-scroll-control'));
+  return !button || Boolean(button.closest('.fan-card,.physical-zone,.public-zone-fan-card'));
 }
 function handCursorSurface(target: EventTarget | null): target is Element {
   if (!(target instanceof Element)) return false;
@@ -1059,7 +967,7 @@ function handPointerClick(event: MouseEvent): void {
   }, 720);
 }
 function trackCameraPointer(event: PointerEvent): void {
-  if (event.pointerType !== 'mouse' || (event.target instanceof Element && event.target.closest('.stage-shortcuts,.general-actions,.deck-actions')) || reducedMotion.value || cameraMode.value !== 'seat' || showPlaymats.value || searchOpen.value || tokenLibraryOpen.value || showHelp.value || openPublicZones.value.size) return;
+  if (event.pointerType !== 'mouse' || (event.target instanceof Element && event.target.closest('.stage-shortcuts,.general-actions,.deck-actions')) || reducedMotion.value || cameraMode.value !== 'seat' || showPlaymats.value || searchOpen.value || tokenLibraryOpen.value || showHelp.value) return;
   const pointer = cameraCoordinates(event);
   const vertical = 1 - pointer.y / Math.max(1, stageSize.value.height) * 2;
   setLook((pointer.x / Math.max(1, stageSize.value.width) * 2 - 1) * 18, vertical * 18, Math.max(0, vertical));
@@ -1106,7 +1014,9 @@ function finishDrag(event: PointerEvent): void {
   const target = dropTargetAt(event.clientX, event.clientY);
   const destination = target?.zone;
   const targetSeatId = target?.seatId as SeatPosition | undefined;
-  if (moved && destination === 'battlefield' && targetSeatId && targetSeatId === props.seatId) {
+  if (moved && destination === 'library' && sourceZone === 'revealed') {
+    revealSinglePrompt.value = id; suppressClickId.value = id;
+  } else if (moved && destination === 'battlefield' && targetSeatId && targetSeatId === props.seatId) {
     const card = props.state.cards[id];
     const position = screenToCardPosition(cameraView.value, pointer.x, pointer.y, targetSeatId, card?.tapped, sourceZone === 'battlefield' && targetSeatId === sourceSeatId ? offset : { x: 0, y: 0 });
     if (position && sourceZone === 'battlefield' && targetSeatId === sourceSeatId) emitAction({ type: 'REPOSITION_CARD', cardId: id, ...position });
@@ -1241,19 +1151,32 @@ function endPointer(event: PointerEvent): void {
   }
   handDragCanReopen.value = true;
 }
-function changeZoom(amount: number): void { if (!dragCard.value && !contextMenu.value) cameraFov.value = Math.min(FOV_LIMITS.max, Math.max(FOV_LIMITS.min, cameraFov.value + amount)); }
+function setZoomImmediately(fov: number): void {
+  if (zoomFrame) cancelAnimationFrame(zoomFrame);
+  zoomFrame = 0;
+  zoomFrameAt = 0;
+  requestedFov = cameraFov.value = fov;
+}
+function zoomTick(now: number): void {
+  const elapsed = zoomFrameAt ? Math.min(64, now - zoomFrameAt) : 16;
+  zoomFrameAt = now;
+  cameraFov.value += (requestedFov - cameraFov.value) * (1 - Math.exp(-elapsed / 90));
+  if (Math.abs(requestedFov - cameraFov.value) > 0.01) zoomFrame = requestAnimationFrame(zoomTick);
+  else setZoomImmediately(requestedFov);
+}
+function changeZoom(amount: number): void {
+  if (dragCard.value || contextMenu.value) return;
+  requestedFov = Math.min(FOV_LIMITS.max, Math.max(FOV_LIMITS.min, requestedFov + amount));
+  if (reducedMotion.value) setZoomImmediately(requestedFov);
+  else if (!zoomFrame && requestedFov !== cameraFov.value) zoomFrame = requestAnimationFrame(zoomTick);
+}
 function zoom(event: WheelEvent): void {
   if (!(event.target instanceof Element)) { changeZoom(event.deltaY < 0 ? -4 : 4); return; }
-  const fan = event.target.closest<HTMLElement>('.public-zone-fan');
-  if (fan?.dataset.seat && (fan.dataset.dropZone === 'graveyard' || fan.dataset.dropZone === 'exile')) {
-    wheelZoneFan(event, fan.dataset.seat as TableSeatId, fan.dataset.dropZone);
-    return;
-  }
   if (event.target.closest('.own-hand-fan, .modal-scrim, .inspection-overlay')) return;
   changeZoom(event.deltaY < 0 ? -4 : 4);
 }
-function focusOwnSeat(): void { cameraMode.value = props.seatId ? 'seat' : 'overview'; cameraFov.value = stageSize.value.width <= 700 ? 70 : 55; setLook(0, 0, 0); }
-function focusTable(): void { cameraMode.value = 'overview'; cameraFov.value = stageSize.value.width <= 700 ? 70 : 55; setLook(0, 0, 0); }
+function focusOwnSeat(): void { cameraMode.value = props.seatId ? 'seat' : 'overview'; setZoomImmediately(stageSize.value.width <= 700 ? 70 : 55); setLook(0, 0, 0); }
+function focusTable(): void { cameraMode.value = 'overview'; setZoomImmediately(stageSize.value.width <= 700 ? 70 : 55); setLook(0, 0, 0); }
 function clickCard(id: string): void { if (suppressClickId.value === id) return; select(id); }
 function selectFieldCard(id: string, event?: MouseEvent): void { clickCard(id); if (event) handPointerClick(event); }
 function clickHandCard(id: string): void {
@@ -1280,21 +1203,26 @@ function closeInspection(): void { closeCardInspection(); }
 function menuTargetFor(element: Element): MenuTarget | undefined {
   const card = element.closest<HTMLElement>('[data-menu-card]')?.dataset.menuCard;
   if (card) return { kind: 'card', cardId: card };
+  const hand = element.closest<HTMLElement>('[data-menu-hand-seat]')?.dataset.menuHandSeat as TableSeatId | undefined;
+  if (hand && hand !== props.seatId && props.state.seats.some(seat => seat.id === hand)) return { kind: 'hand', seatId: hand };
   const player = element.closest<HTMLElement>('.seat-life-panel')?.closest<HTMLElement>('.seat-place')?.dataset.seat as TableSeatId | undefined;
-  if (player && targetReferenceValid({ kind: 'player', seatId: player }, props.state)) return { kind: 'player', seatId: player };
+  if (player && validTableTarget({ kind: 'player', seatId: player })) return { kind: 'player', seatId: player };
   const deck = element.closest<HTMLElement>('[data-menu-deck]')?.dataset.menuDeck;
   if (deck) return { kind: 'deck', seatId: deck };
-  if (element.closest('.table-stage') && !element.closest('button, input, select, .own-hand-fan')) return { kind: 'background' };
+  if (element.closest('.table-stage') && !element.closest('button, input, select, .own-hand-fan, [data-menu-hand-seat]')) return { kind: 'background' };
 }
 const menuOptions = computed<TableMenuOption[]>(() => {
   const target = contextMenu.value?.target;
   if (!target) return [];
+  if (target.kind === 'hand') return isMine.value && props.online && !(props.handReveals ?? []).some(reveal => reveal.ownerSeatId === target.seatId)
+    ? [{ id: 'request-hand-reveal', label: t('table.requestHandReveal'), disabled: Boolean(props.busy) || props.state.phase === 'finished' }]
+    : [];
   if (target.kind === 'player') return isMine.value ? [{ id: 'target-select', label: t('table.targetSelect') }] : [];
   if (target.kind === 'card') return [...cardMenuOptions(props.state, target.cardId, props.seatId, props.spectator, props.busy).map(option => {
     const card = props.state.cards[target.cardId];
     const key = option.id === 'tap' ? card.tapped ? 'table.menuTap' : 'table.menuUntap' : option.id === 'face-down' ? card.faceDown ? 'table.menuRevealFaceDown' : 'table.menuFaceDown' : `table.menu${option.id[0].toUpperCase()}${option.id.slice(1)}`;
     return { ...option, label: t(key) };
-  }), ...(isMine.value && targetReferenceValid({ kind: 'card', cardId: target.cardId }, props.state) ? [{ id: 'target-select', label: t('table.targetSelect') }, { id: 'target-from', label: t('table.targetFrom') }] : [])];
+  }), ...(isMine.value && validTableTarget({ kind: 'card', cardId: target.cardId }) ? [{ id: 'target-select', label: t('table.targetSelect') }, { id: 'target-from', label: t('table.targetFrom') }] : [])];
   if (target.kind === 'deck') {
     if (target.seatId !== props.seatId || !isMine.value) return [{ id: 'private', label: t('table.menuPrivateLibrary'), disabled: true }];
     const disabled = Boolean(props.busy || props.state.paused || props.state.phase === 'finished' || selfSeat.value?.status !== 'playing');
@@ -1306,7 +1234,7 @@ const menuOptions = computed<TableMenuOption[]>(() => {
   ];
 });
 const menuCard = computed(() => contextMenu.value?.target.kind === 'card' ? props.state.cards[contextMenu.value.target.cardId] : undefined);
-const menuTitle = computed(() => contextMenu.value?.target.kind === 'player' ? t('table.lifeOf', { name: seatAt(contextMenu.value.target.seatId)?.name }) : menuCard.value ? menuCard.value.faceDown || !menuCard.value.card ? t('table.faceDownCard') : menuCard.value.card.name : contextMenu.value?.target.kind === 'deck' ? t('table.zones.library') : t('table.gameTable'));
+const menuTitle = computed(() => contextMenu.value?.target.kind === 'player' ? t('table.lifeOf', { name: seatAt(contextMenu.value.target.seatId)?.name }) : contextMenu.value?.target.kind === 'hand' ? t('table.opponentHand', { name: seatAt(contextMenu.value.target.seatId)?.name, count: hiddenCount(seatAt(contextMenu.value.target.seatId)!, 'hand') }, hiddenCount(seatAt(contextMenu.value.target.seatId)!, 'hand')) : menuCard.value ? menuCard.value.faceDown || !menuCard.value.card ? t('table.faceDownCard') : menuCard.value.card.name : contextMenu.value?.target.kind === 'deck' ? t('table.zones.library') : t('table.gameTable'));
 function closeMenu(): void {
   contextMenu.value = undefined;
   if (menuOpener?.isConnected) menuOpener.focus({ preventScroll: true });
@@ -1341,6 +1269,7 @@ async function chooseMenu(id: string): Promise<void> {
     return;
   }
   if (id === 'target-select' && menuTarget?.kind === 'player') publishTarget({ kind: 'player', seatId: menuTarget.seatId });
+  if (id === 'request-hand-reveal' && menuTarget?.kind === 'hand') emit('request-hand-reveal', menuTarget.seatId);
   if (id === 'target-select' && cardId) publishTarget({ kind: 'card', cardId });
   if (id === 'target-from' && cardId) { targetSource.value = { kind: 'card', cardId }; targetPreviewPoint.value = menuPoint; }
   if (id === 'inspect' && cardId) inspectCard(cardId);
@@ -1351,7 +1280,7 @@ async function chooseMenu(id: string): Promise<void> {
 }
 function cancelLongPress(): void { clearTimeout(longPressTimer); longPressPoint = undefined; }
 function startLongPress(event: PointerEvent): void {
-  if (event.pointerType !== 'touch' || !(event.target instanceof HTMLElement) || !menuTargetFor(event.target)) return;
+  if (event.pointerType !== 'touch' || !(event.target instanceof HTMLElement) || event.target.closest('.card-counter-controls') || !menuTargetFor(event.target)) return;
   cancelLongPress();
   longPressPoint = { x: event.clientX, y: event.clientY, target: event.target };
   longPressTimer = setTimeout(() => {
@@ -1382,7 +1311,25 @@ function queuePointer(event: PointerEvent, table: boolean): void {
   pendingPointer = { event, table };
   if (!pointerFrame) pointerFrame = requestAnimationFrame(flushPointer);
 }
+const cardTooltip = ref<{ cardId: string; x: number; y: number }>();
+const tooltipFace = computed(() => {
+  const card = cardTooltip.value && props.state.cards[cardTooltip.value.cardId];
+  if (!card?.card || card.faceDown) return undefined;
+  const face = card.card.card_faces?.[card.face ?? 0];
+  return { name: face?.name || card.card.name, mana: face?.mana_cost || card.card.mana_cost, type: face?.type_line || card.card.type_line };
+});
+function updateCardTooltip(event: PointerEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  const element = target?.closest<HTMLElement>('[data-menu-card]');
+  const cardId = element?.dataset.menuCard;
+  if (event.pointerType !== 'mouse' || event.buttons || !target?.closest('.table-stage .card-tile') || !cardId || !props.state.cards[cardId]?.card || props.state.cards[cardId]?.faceDown || contextMenu.value || inspectionOpen.value || dragCard.value) {
+    cardTooltip.value = undefined;
+    return;
+  }
+  cardTooltip.value = { cardId, x: Math.max(8, Math.min(window.innerWidth - 8, event.clientX)), y: Math.min(window.innerHeight - 48, event.clientY + 35) };
+}
 function handlePointerMove(event: PointerEvent): void {
+  updateCardTooltip(event);
   if (showTutorial.value) return;
   if (moveTargetPointer(event)) return;
   if (event.pointerType === 'mouse') lastMousePoint = { x: event.clientX, y: event.clientY };
@@ -1439,6 +1386,7 @@ function seatTurnStatus(seat: PlayerSeat): string {
 }
 function onKeys(event: KeyboardEvent): void {
   if (showTutorial.value) return;
+  if (event.key === 'Tab') stageSpaceFocus.value = false;
   keyboardInput = true;
   if (ownHandElement.value?.contains(document.activeElement)) handKeyboardFocus.value = true;
   if (contextMenu.value) return;
@@ -1448,7 +1396,7 @@ function onKeys(event: KeyboardEvent): void {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (event.target instanceof HTMLElement && event.target.isContentEditable)) return;
   if (event.key === 'Escape' && (inspectionOpen.value || inspectionPending.value)) return;
   if (event.key === 'Escape' && showLog.value) { event.preventDefault(); showLog.value = false; return; }
-  if (event.key === 'Escape' && openPublicZones.value.size) { event.preventDefault(); closeZoneFans(); return; }
+  if (event.key === 'Escape' && openPublicZone.value) { event.preventDefault(); closeZoneFans(); return; }
   if (event.key === 'Escape') { selectedCardId.value = ''; showHelp.value = false; searchOpen.value = false; closeInspection(); return; }
   if (showHelp.value || showSettings.value || showPlaymats.value || searchOpen.value || tokenLibraryOpen.value || showLog.value || inspectionOpen.value || inspectionPending.value) return;
   if (event.key === '?' || (event.shiftKey && event.key === '/')) { showHelp.value = !showHelp.value; event.preventDefault(); return; }
@@ -1461,6 +1409,14 @@ function onKeys(event: KeyboardEvent): void {
   if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'd') { event.preventDefault(); draw(); return; }
   if (event.ctrlKey && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) return;
   if (event.ctrlKey || event.altKey || event.metaKey || !isMine.value) return;
+  if (event.key === ' ' && !event.shiftKey && !event.defaultPrevented && stackTop.value) {
+    const target = event.target;
+    if (target instanceof Element && target.closest('button, a, [role="button"]')) return;
+    event.preventDefault();
+    if (target === stageElement.value) stageSpaceFocus.value = true;
+    if (!event.repeat && !props.busy && !props.state.paused && !props.state.passes.includes(props.seatId ?? '')) passPriority();
+    return;
+  }
   if (event.key.toLowerCase() === 't' && !event.repeat) {
     const hovered = hoveredBattlefieldCard();
     if (hovered) tapCard(hovered);
@@ -1478,7 +1434,7 @@ function onLogDialogKeys(event: KeyboardEvent): void {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
-function onMotionChange(event: MediaQueryListEvent): void { reducedMotion.value = event.matches; if (event.matches) { freezeCamera(); setLook(0, 0, 0); } }
+function onMotionChange(event: MediaQueryListEvent): void { reducedMotion.value = event.matches; if (event.matches) { setZoomImmediately(requestedFov); freezeCamera(); setLook(0, 0, 0); } }
 onMounted(() => {
   void loadTutorialPreference();
   window.addEventListener('click', clearSelectionOutsideCards, true);
@@ -1493,7 +1449,7 @@ onMounted(() => {
   window.addEventListener('pointerdown', trackHandOutsidePointerDown, true);
   window.addEventListener('pointermove', followCursorWhileInspecting, true);
   updateStageSize();
-  if (stageSize.value.width <= 700) cameraFov.value = 70;
+  if (stageSize.value.width <= 700) setZoomImmediately(70);
   resizeObserver = new ResizeObserver(updateStageSize);
   if (stageElement.value) resizeObserver.observe(stageElement.value);
   handResizeObserver = new ResizeObserver(measureOwnHand);
@@ -1534,8 +1490,8 @@ onBeforeUnmount(() => {
   clearTimeout(revealTouchClickTimer);
   clearTimeout(flightTimer);
 });
-watch(() => targetSource.value && props.state.cards[targetSource.value.cardId]?.zone, () => { if (targetSource.value && !targetReferenceValid(targetSource.value, props.state)) cancelTarget(); });
-watch(() => props.state.id, () => { void loadTutorialPreference(); blurTargets(); selectedCardId.value = ''; selectedBottom.value = []; clearPendingDraw(); closeMenu(); openPublicZones.value = new Set(); publicZoneFanSides.value = new Set(); zoneFanPositions.value = {}; zoneFanStarts.value = {}; zoneFanWheel.clear(); closeInspection(); restOwnHand(); });
+watch(() => [targetSource.value && props.state.cards[targetSource.value.cardId]?.zone, props.handReveals?.map(reveal => reveal.cards.map(card => card.id).join(',')).join('|')], () => { if (targetSource.value && !validTableTarget(targetSource.value)) cancelTarget(); });
+watch(() => props.state.id, () => { void loadTutorialPreference(); blurTargets(); selectedCardId.value = ''; selectedBottom.value = []; clearPendingDraw(); closeMenu(); openPublicZone.value = undefined; closeInspection(); restOwnHand(); });
 watch(() => props.seatId, () => { focusOwnSeat(); restOwnHand(); });
 watch([() => props.state.id, () => props.seatId], resetHandExpansion);
 watch(() => ownHand.value.map(card => card.id).join(','), async () => {
@@ -1561,22 +1517,11 @@ watch([() => ownHand.value.map(card => card.id).join(','), selectedCardId, () =>
   measureOwnHand();
 }, { flush: 'post' });
 watch(cameraView, () => {
-  updateZoneFanGeometry();
   if (localHand.value?.zone !== 'table' || localHand.value.pose === 'rest' || localHand.value.pointerX === undefined || localHand.value.pointerY === undefined) return;
   const previous = localHand.value;
   const world = screenToTable(cameraView.value, previous.pointerX ?? 0, previous.pointerY ?? 0);
   if (world) queueHandPresence({ ...world, zone: 'table', pose: previous.pose, pointerX: previous.pointerX, pointerY: previous.pointerY, ...(previous.cardId ? { cardId: previous.cardId } : {}), ...(previous.gestureId ? { gestureId: previous.gestureId } : {}) });
 }, { flush: 'post' });
-watch(() => props.seatId && seatAt(props.seatId) ? (['graveyard', 'exile'] as const).map(zone => ownerCardsFor(seatAt(props.seatId!)!, zone).map(card => card.id).join(',')).join('|') : '', () => {
-  if (!props.seatId) return;
-  const starts = { ...zoneFanStarts.value };
-  for (const zone of ['graveyard', 'exile'] as const) {
-    const key = zoneFanKey(props.seatId, zone);
-    const layout = zoneFanLayout(props.seatId, zone);
-    starts[key] = layout.start;
-  }
-  zoneFanStarts.value = starts;
-});
 watch(prioritySeat, seatId => {
   const angle = SEAT_PLACEMENT[seatId as TableSeatId]?.angle ?? 0;
   stackAngle.value += ((angle - stackAngle.value) % 360 + 540) % 360 - 180;
@@ -1588,7 +1533,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
 </script>
 
 <template>
-  <main class="table-shell" :class="{ 'motion-reduced': reducedMotion, 'has-virtual-cursor': hasVirtualCursor }" :style="geometryStyle" @contextmenu="onContext" @dragstart.prevent @pointermove.capture="handlePointerMove" @pointerdown.capture="handlePointerDown" @pointerup.capture="handleTablePointerUp" @pointercancel.capture="handleTablePointerUp" @click.capture="handleTableClick">
+  <main class="table-shell" :class="{ 'motion-reduced': reducedMotion, 'has-virtual-cursor': hasVirtualCursor }" :style="geometryStyle" @contextmenu="onContext" @dragstart.prevent @pointermove.capture="handlePointerMove" @pointerleave="cardTooltip = undefined" @pointerdown.capture="cardTooltip = undefined; handlePointerDown($event)" @pointerup.capture="handleTablePointerUp" @pointercancel.capture="handleTablePointerUp" @click.capture="handleTableClick">
     <header class="table-topbar">
       <div class="table-brand"><img class="brand-logo" :src="meuMagicLogo" alt="" aria-hidden="true"/><span>{{ t('app.name') }}</span></div>
       <button v-if="multiplayer && roomCode" class="room-code-badge table-room-code" @click="emit('copy-room-code')"><span>{{ t('lobby.inviteCode') }}</span><strong>{{ roomCode }}</strong><small>{{ t('lobby.copyCode') }}</small></button>
@@ -1598,7 +1543,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
     <div v-if="state.paused || disconnectedPlayers.length" class="table-pause-banner"><span>Ⅱ</span><div><strong>{{ t('table.paused') }}</strong><small>{{ state.paused ? t('table.pausedDescription', { name: disconnectedPlayers.find(player => !player.suspended)?.name ?? '' }) : disconnectedPlayers.map(player => `${player.name} · ${t('table.suspended')}`).join(' · ') }}</small><button v-for="player in disconnectedPlayers.filter(player => !player.suspended)" v-show="isHost && state.phase === 'playing'" :key="player.id" class="button button-ghost" :disabled="busy" @click.stop="emit('continue-without', player.id)">{{ t('table.continueWithout', { name: player.name }) }}</button></div><span>{{ t('table.synced') }}</span></div>
 
     <div class="game-layout">
-      <section ref="stageElement" class="table-stage" tabindex="0" :aria-label="t('table.gameTable')" @wheel.prevent="zoom" @pointerdown="startPan" @pointerup="endPointer" @pointercancel="endPointer" @pointerleave="leaveStage">
+      <section ref="stageElement" class="table-stage" :class="{ 'space-focus': stageSpaceFocus }" tabindex="0" :aria-label="t('table.gameTable')" @blur="stageSpaceFocus = false" @wheel.prevent="zoom" @pointerdown="startPan" @pointerup="endPointer" @pointercancel="endPointer" @pointerleave="leaveStage">
         <div ref="sceneViewport" class="scene-viewport">
         <div ref="cameraScene" class="camera-scene">
           <div class="felt-board">
@@ -1627,22 +1572,30 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
             <section class="player-mat" :class="[`mat-${seatId}`, seatId === props.seatId ? 'is-self' : '', { 'is-drop-ready': dropReady('battlefield', seatId), 'is-drop-hovered': dropHovered('battlefield', seatId) }]" data-drop-zone="battlefield" :data-seat="seatId">
               <PlaymatArt v-if="!customPlaymatsDisabled && validPlaymatId(playmatIds[seatId])" class="playmat-art" :id="playmatIds[seatId]" />
               <template v-if="seatAt(seatId)">
-                <TableField :cards="cardsFor(seatAt(seatId)!, 'battlefield')" :seat-id="seatId" :selected-id="selectedCardId" :arriving-id="arrivingCardId" :drag-id="dragCard?.id" :drag-moved="dragCard?.moved" :reduced-motion="reducedMotion" @drag="startDrag" @select="selectFieldCard" @activate="doubleClickCard" @tap="tapCard" />
-                <div v-if="seatId === props.seatId && !spectator" class="hand-count"><span>{{ hiddenCount(seatAt(seatId)!, 'hand') }} {{ t('table.handCount') }}</span></div>
+                <TableField :cards="cardsFor(seatAt(seatId)!, 'battlefield')" :seat-id="seatId" :selected-id="selectedCardId" :arriving-id="arrivingCardId" :drag-id="dragCard?.id" :drag-moved="dragCard?.moved" :reduced-motion="reducedMotion" :can-adjust-counters="!busy && !state.paused && state.phase !== 'finished' && selfSeat?.status === 'playing'" :spectator="spectator" @drag="startDrag" @select="selectFieldCard" @activate="doubleClickCard" @tap="tapCard" @counter="adjustCardCounter" />
+                <section v-if="seatAt(seatId)!.libraryRevealOpen" class="library-reveal-mat" data-drop-zone="revealed" :data-seat="seatId" :aria-label="t('table.libraryRevealTitle', { name: seatAt(seatId)!.name })" @pointerdown.stop>
+                  <header><strong>{{ t('table.libraryRevealTitle', { name: seatAt(seatId)!.name }) }}</strong><template v-if="seatId === props.seatId && isMine"><button type="button" :disabled="busy || state.paused || !selfSeat?.library.length" @click.stop="emitAction({ type: 'REVEAL_LIBRARY_TOP' })">{{ t('table.revealNext') }}</button><button type="button" :disabled="busy || state.paused" :aria-label="t('common.close')" @click.stop="moveRevealed('top', undefined, true)">×</button></template></header>
+                  <div class="library-reveal-cards"><button v-for="card in revealedFor(seatAt(seatId)!)" :key="card.id" type="button" :data-menu-card="card.id" :aria-label="card.card?.name ?? t('table.card')" @pointerdown.stop="startDrag($event, card.id)" @click.stop="select(card.id)" @dblclick.stop="inspectCard(card.id, $event)"><CardTile :card="card" :compact="true" /></button></div>
+                  <footer v-if="seatId === props.seatId && isMine"><span>{{ t('table.revealActions') }}</span><button v-for="destination in (['top', 'bottom', 'graveyard', 'exile', 'hand'] as const)" :key="destination" type="button" :disabled="busy || state.paused || !seatAt(seatId)!.libraryRevealed?.length" @click.stop="moveRevealed(destination)">{{ t(`table.revealDestination.${destination}`) }}</button></footer>
+                  <footer v-if="seatId === props.seatId && isMine && selectedCard?.zone === 'revealed' && selectedCard.ownerId === seatId"><span>{{ selectedCard.card?.name }}</span><button type="button" @click.stop="inspectCard(selectedCard.id)">{{ t('table.menuInspect') }}</button><button type="button" :disabled="busy || state.paused" @click.stop="emitAction({ type: 'MOVE_CARD', cardId: selectedCard!.id, zone: 'battlefield' })">{{ t('table.zones.battlefield') }}</button><button v-for="destination in (['top', 'bottom', 'graveyard', 'exile', 'hand'] as const)" :key="destination" type="button" :disabled="busy || state.paused" @click.stop="moveRevealed(destination, [selectedCard!.id])">{{ t(`table.revealDestination.${destination}`) }}</button></footer>
+                </section>
+                <div v-if="seatId === props.seatId && !spectator" class="hand-count" data-drop-zone="hand" :data-seat="seatId"><span>{{ hiddenCount(seatAt(seatId)!, 'hand') }} {{ t('table.handCount') }}</span></div>
                 <div class="mat-mark">{{ seatId === 'southWest' ? '01' : seatId === 'southEast' ? '02' : seatId === 'northEast' ? '03' : '04' }} <i>·</i> {{ t('table.gameZone') }}</div>
               </template>
               <div v-else class="empty-seat"><span>＋</span><strong>{{ t('table.waitingPlayer') }}</strong><small>{{ t('table.invitePlayer') }}</small></div>
             </section>
             <template v-if="seatAt(seatId)">
-              <OpponentHand v-if="spectator || seatId !== props.seatId" :count="hiddenCount(seatAt(seatId)!, 'hand')" :player-name="seatAt(seatId)!.name" />
+              <OpponentHand v-if="spectator || seatId !== props.seatId" :count="hiddenCount(seatAt(seatId)!, 'hand')" :player-name="seatAt(seatId)!.name" :seat-id="seatId" />
+              <RevealedHand v-if="handReveals?.find(reveal => reveal.ownerSeatId === seatId)" v-bind="handReveals.find(reveal => reveal.ownerSeatId === seatId)!" :can-close="seatId === props.seatId && isMine" @close="emit('end-hand-reveal')" />
               <div class="seat-zones-left">
                 <div class="library-zone-group">
                   <div v-if="seatId === props.seatId && isMine" class="deck-actions" :aria-label="t('table.libraryActions')">
                     <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing' || state.phase === 'mulligan'" :title="t('table.drawCard')" :aria-label="t('table.drawCard')" @click.stop="draw"><span>↧</span><small>{{ t('table.draw') }}</small></button>
                     <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing'" :title="t('table.searchLibrary')" :aria-label="t('table.searchLibrary')" @click.stop="searchOpen = true"><span>⌕</span><small>{{ t('table.search') }}</small></button>
+                    <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing' || selfSeat?.libraryRevealOpen" :title="t('table.revealLibrary')" :aria-label="t('table.revealLibrary')" @click.stop="emitAction({ type: 'OPEN_LIBRARY_REVEAL' })"><span>◉</span><small>{{ t('table.reveal') }}</small></button>
                     <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing'" :title="t('table.shuffleLibrary')" :aria-label="t('table.shuffleLibrary')" @click.stop="emitAction({type:'SHUFFLE'})"><span>⤨</span><small>{{ t('table.shuffle') }}</small></button>
                   </div>
-                  <button class="physical-zone library-pile" :class="{ 'is-stacked': hiddenCount(seatAt(seatId)!, 'library') > 0 }" :data-menu-deck="seatId" :aria-label="t('table.libraryOf', { name: seatAt(seatId)?.name, count: hiddenCount(seatAt(seatId)!, 'library') }, hiddenCount(seatAt(seatId)!, 'library'))" @click.stop="seatId === props.seatId && isMine ? draw() : undefined">
+                  <button class="physical-zone library-pile" data-drop-zone="library" :data-seat="seatId" :class="{ 'is-stacked': hiddenCount(seatAt(seatId)!, 'library') > 0 }" :data-menu-deck="seatId" :aria-label="t('table.libraryOf', { name: seatAt(seatId)?.name, count: hiddenCount(seatAt(seatId)!, 'library') }, hiddenCount(seatAt(seatId)!, 'library'))" @click.stop="seatId === props.seatId && isMine ? draw() : undefined">
                     <PhysicalCardStack v-if="hiddenCount(seatAt(seatId)!, 'library') > 0" :count="hiddenCount(seatAt(seatId)!, 'library')" :seed="`${seatId}:library`">
                       <template #caption><span class="zone-caption">{{ t('table.zones.library').toUpperCase() }} <b>{{ hiddenCount(seatAt(seatId)!, 'library') }}</b></span></template>
                     </PhysicalCardStack>
@@ -1650,7 +1603,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                     <span v-if="hiddenCount(seatAt(seatId)!, 'library') === 0" class="zone-caption">{{ t('table.zones.library').toUpperCase() }} <b>0</b></span>
                   </button>
                 </div>
-                <div v-for="zone in (['graveyard','exile'] as const)" :key="zone" class="zone-pile-wrap" :data-zone-key="zoneFanKey(seatId, zone)" :class="{ 'fan-is-open': zoneFanOpen(seatId, zone) }">
+                <div v-for="zone in (['graveyard','exile'] as const)" :key="zone" class="zone-pile-wrap" :style="{ '--zone-index': zone === 'graveyard' ? 1 : 2 }" :data-zone-key="zoneFanKey(seatId, zone)" :class="{ 'fan-is-open': zoneFanOpen(seatId, zone) }">
                   <button class="physical-zone public-zone-toggle" :class="[`physical-${zone}`, { 'is-stacked': ownerCardsFor(seatAt(seatId)!, zone).length > 0, 'is-zone-open': zoneFanOpen(seatId, zone), 'is-drop-ready': dropReady(zone, seatId), 'is-drop-hovered': dropHovered(zone, seatId) }]" :data-drop-zone="zone" :data-seat="seatId" :data-menu-card="ownerCardsFor(seatAt(seatId)!, zone).at(-1)?.id" :aria-expanded="seatId === props.seatId && isMine ? zoneFanOpen(seatId, zone) : undefined" :aria-label="zone === 'graveyard' ? t('table.graveyardOf', { name: seatAt(seatId)?.name, count: ownerCardsFor(seatAt(seatId)!, zone).length }, ownerCardsFor(seatAt(seatId)!, zone).length) : t('table.exileOf', { name: seatAt(seatId)?.name, count: ownerCardsFor(seatAt(seatId)!, zone).length }, ownerCardsFor(seatAt(seatId)!, zone).length)" @click.stop="activatePublicZone(seatId, zone, $event.currentTarget as HTMLElement)">
                     <PhysicalCardStack v-if="ownerCardsFor(seatAt(seatId)!, zone).length" :count="ownerCardsFor(seatAt(seatId)!, zone).length" :seed="`${seatId}:${zone}`" :top-card="ownerCardsFor(seatAt(seatId)!, zone).at(-1)">
                       <template #caption><span class="zone-caption">{{ (zone === 'graveyard' ? t('table.graveyard') : t('table.exile')).toUpperCase() }} <b>{{ ownerCardsFor(seatAt(seatId)!, zone).length }}</b></span></template>
@@ -1662,22 +1615,12 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                     <button type="button" :aria-label="t('table.openZoneAside', { zone: t(`table.zones.${zone}`) })" :title="t('table.openZoneAside', { zone: t(`table.zones.${zone}`) })" :aria-pressed="zoneFanOpen(seatId, zone)" @click.stop="toggleZoneFan(seatId, zone, $event.currentTarget as HTMLElement)"><span aria-hidden="true">⇤</span></button>
                     <button type="button" :aria-label="t('table.searchZone', { zone: t(`table.zones.${zone}`) })" :title="t('table.searchZone', { zone: t(`table.zones.${zone}`) })" @click.stop="openPublicZoneSearch(seatId, zone, $event.currentTarget as HTMLElement)"><span aria-hidden="true">⌕</span></button>
                   </div>
-                  <Teleport v-if="stageElement" :to="stageElement">
-                    <div v-if="zoneFanOpen(seatId, zone)" class="public-zone-fan" :class="[`fan-${zone}`, { 'opens-right': publicZoneFanSides.has(zoneFanKey(seatId, zone)), 'is-drop-ready': dropReady(zone, seatId), 'is-drop-hovered': dropHovered(zone, seatId) }]" :style="zoneFanStyle(seatId, zone)" :data-zone-key="zoneFanKey(seatId, zone)" :data-drop-zone="zone" :data-seat="seatId" role="group" :aria-label="`${zone === 'graveyard' ? t('table.graveyard') : t('table.exile')} · ${seatAt(seatId)?.name}`" @pointerdown.stop="startZoneFanTouch($event, zoneFanKey(seatId, zone))" @pointerup.stop="endZoneFanTouch($event, seatId, zone)" @pointercancel="zoneFanTouch = undefined">
-                    <template v-for="fan in [zoneFanLayout(seatId, zone)]" :key="zoneFanKey(seatId, zone)">
-                      <button class="zone-fan-scroll-control zone-fan-scroll-back" type="button" :aria-label="t('table.zoneFanPrevious')" :disabled="!fan.before" @pointerdown.stop @click.stop="advanceZoneFan(seatId, zone, -1)">‹</button>
-                      <div class="public-zone-fan-display">
-                        <div v-if="!ownerCardsFor(seatAt(seatId)!, zone).length" class="public-zone-fan-empty">{{ t('table.zoneEmpty') }}</div>
-                        <button v-if="fan.before" type="button" class="public-zone-fan-stack is-before" :aria-label="t('table.zoneFanStackPrevious', { count: fan.before })" @pointerdown.stop @click.stop="advanceZoneFan(seatId, zone, -1)"><CardTile :card="ownerCardsFor(seatAt(seatId)!, zone)[fan.start - 1]" /><b>{{ fan.before }}</b></button>
-                        <div class="public-zone-fan-open">
-                          <button v-for="(card, index) in fan.cards" :key="card.id" class="public-zone-fan-card" :class="{ 'is-dragging-source': dragCard?.id === card.id && dragCard?.moved }" :data-menu-card="card.id" :data-fan-card-index="fan.start + index" :style="zoneFanCardStyle(fan, index)" :aria-label="card.faceDown ? t('table.faceDownCard') : card.card?.name ?? t('table.card')" @keydown="navigateZoneFan($event, seatId, zone)" @pointerdown.stop="startDrag($event, card.id)" @click.stop="suppressClickId !== card.id && inspectCard(card.id, $event)"><CardTile :card="card" /></button>
-                        </div>
-                        <button v-if="fan.after" type="button" class="public-zone-fan-stack is-after" :aria-label="t('table.zoneFanStackNext', { count: fan.after })" @pointerdown.stop @click.stop="advanceZoneFan(seatId, zone, 1)"><CardTile :card="ownerCardsFor(seatAt(seatId)!, zone)[fan.start + fan.cards.length]" /><b>{{ fan.after }}</b></button>
-                      </div>
-                      <button class="zone-fan-scroll-control zone-fan-scroll-forward" type="button" :aria-label="t('table.zoneFanNext')" :disabled="!fan.after" @pointerdown.stop @click.stop="advanceZoneFan(seatId, zone, 1)">›</button>
-                    </template>
+                  <div v-if="zoneFanOpen(seatId, zone)" class="public-zone-fan" :class="[`fan-${zone}`, { 'is-drop-ready': dropReady(zone, seatId), 'is-drop-hovered': dropHovered(zone, seatId) }]" :data-zone-key="zoneFanKey(seatId, zone)" :data-drop-zone="zone" :data-seat="seatId" role="group" :aria-label="`${zone === 'graveyard' ? t('table.graveyard') : t('table.exile')} · ${seatAt(seatId)?.name}`" @wheel.stop @pointerdown.stop>
+                    <div v-if="!ownerCardsFor(seatAt(seatId)!, zone).length" class="public-zone-fan-empty">{{ t('table.zoneEmpty') }}</div>
+                    <div v-else class="public-zone-fan-grid" :style="{ '--zone-columns': zoneColumns(ownerCardsFor(seatAt(seatId)!, zone).length), '--zone-rows': zoneRows(ownerCardsFor(seatAt(seatId)!, zone).length) }">
+                      <button v-for="(card, index) in ownerCardsFor(seatAt(seatId)!, zone)" :key="card.id" class="public-zone-fan-card" :style="zoneCardPosition(index, ownerCardsFor(seatAt(seatId)!, zone).length)" :class="{ 'is-dragging-source': dragCard?.id === card.id && dragCard?.moved }" :data-menu-card="card.id" :aria-label="card.faceDown ? t('table.faceDownCard') : card.card?.name ?? t('table.card')" @pointerdown.stop="startDrag($event, card.id)" @click.stop="suppressClickId !== card.id && inspectCard(card.id, $event)"><CardTile :card="card" /></button>
                     </div>
-                  </Teleport>
+                  </div>
                 </div>
               </div>
               <div class="seat-zones-right">
@@ -1711,12 +1654,11 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
               <svg class="hub-shape" viewBox="0 0 460 400" aria-hidden="true"><path d="M230 12 C120 12 24 52 16 142 C7 226 94 256 156 309 C187 336 195 355 230 382 C265 355 273 336 304 309 C366 256 453 226 444 142 C436 52 340 12 230 12 Z" /></svg>
               <div class="hub-content">
                 <header class="hub-heading"><strong>{{ stack.length ? t('table.stack') : t('table.resolved') }}</strong><span v-if="stack.length" class="stack-count">{{ stack.length }}</span></header>
-                <span class="priority-player">{{ seatAt(prioritySeat)?.name }}<small>{{ stack.length ? t('table.nextResponse') : t('table.turnPlayer') }}</small></span>
+                <span class="priority-player">{{ seatAt(prioritySeat)?.name }}<small v-if="!stack.length">{{ t('table.turnPlayer') }}</small></span>
                 <div class="stack-cards" :class="{ 'is-drop-ready': dropReady('stack'), 'is-drop-hovered': dropHovered('stack') }" data-drop-zone="stack">
                   <button v-for="(item, index) in stack.slice(-3)" :key="item.id" class="stack-back" :style="{'--stack-shift':`${(index - (Math.min(stack.length,3)-1)/2)*56}px`,'--stack-angle':`${(index - (Math.min(stack.length,3)-1)/2)*12}deg`}" :data-menu-card="item.sourceId" :aria-label="item.name" @click.stop="inspectCard(item.sourceId, $event)"><CardTile :card="state.cards[item.sourceId]" :compact="true" /><i>{{ item.kind === 'ability' ? 'HABILIDADE' : 'MAGIA' }}</i></button>
                   <span v-if="!stack.length" class="stack-empty"><span>◇</span>{{ t('table.noPending') }}</span>
                 </div>
-                <span v-if="stackTop" class="priority-label" :title="stackTop.name">{{ stackTop.name }}</span>
                 <button v-if="stackTop && isMine" class="resolve-button" :disabled="busy || state.paused || state.passes.includes(seatId ?? '')" @click.stop="passPriority">{{ state.passes.includes(seatId ?? '') ? t('table.youPassed') : t('table.passPriority') }} <kbd>SPACE</kbd></button>
                 <span v-else-if="!stack.length" class="hub-empty-note">{{ t('table.waitingCast') }}</span>
                 <div v-if="stack.length" class="pass-dots"><i v-for="seat in activeSeats" :key="seat.id" :class="{passed: state.passes.includes(seat.id)}" :title="seat.name"></i></div>
@@ -1766,6 +1708,9 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
     </div>
 
     <TableContextMenu v-if="contextMenu" :x="contextMenu.x" :y="contextMenu.y" :options="menuOptions" :title="menuTitle" @choose="chooseMenu" @close="closeMenu" />
+    <div v-if="handRevealPrompt" class="modal-scrim hand-reveal-scrim"><section class="table-settings-dialog" role="dialog" aria-modal="true" :aria-label="t('table.handRevealRequestTitle')"><span class="eyebrow">{{ t('table.handRevealRequestTitle') }}</span><h2>{{ t('table.handRevealRequestBody', { name: handRevealPrompt.requesterName }) }}</h2><footer class="hand-reveal-actions"><button class="button button-ghost" @click="emit('respond-hand-reveal', handRevealPrompt.id, false)">{{ t('common.cancel') }}</button><button class="button button-primary" @click="emit('respond-hand-reveal', handRevealPrompt.id, true)">{{ t('table.acceptReveal') }}</button></footer></section></div>
+    <div v-if="revealSinglePrompt" class="modal-scrim" @click.self="revealSinglePrompt = undefined"><section class="reveal-order-dialog" role="dialog" aria-modal="true" :aria-label="t('table.revealChooseDestination')"><h2>{{ t('table.revealChooseDestination') }}</h2><button v-for="destination in (['top', 'bottom'] as const)" :key="destination" @click="emitAction({ type: 'MOVE_LIBRARY_REVEALED', cardIds: [revealSinglePrompt!], destination }); revealSinglePrompt = undefined">{{ t(`table.revealDestination.${destination}`) }}</button><button @click="revealSinglePrompt = undefined">{{ t('common.cancel') }}</button></section></div>
+    <div v-if="revealOrderPrompt" class="modal-scrim" @click.self="revealOrderPrompt = undefined"><section class="reveal-order-dialog" role="dialog" aria-modal="true" :aria-label="t('table.revealOrderTitle')"><h2>{{ t('table.revealOrderTitle') }}</h2><p>{{ t('table.revealOrderDescription') }}</p><template v-if="!revealOrderPrompt.choosing"><button @click="confirmRevealOrder">{{ t('table.revealKeepOrder') }}</button><button @click="revealOrderPrompt.choosing = true">{{ t('table.revealChooseOrder') }}</button></template><template v-else><ol><li v-for="(id, index) in revealOrderPrompt.ids" :key="id"><span>{{ state.cards[id]?.card?.name ?? t('table.card') }}</span><button :disabled="index === 0" :aria-label="t('table.revealMoveEarlier')" @click="shiftRevealOrder(index, -1)">↑</button><button :disabled="index === revealOrderPrompt.ids.length - 1" :aria-label="t('table.revealMoveLater')" @click="shiftRevealOrder(index, 1)">↓</button></li></ol><button @click="confirmRevealOrder">{{ t('table.revealConfirmOrder') }}</button></template><button @click="revealOrderPrompt = undefined">{{ t('common.cancel') }}</button></section></div>
     <div v-if="showSettings" class="modal-scrim table-settings-scrim" @click.self="showSettings=false" @keydown.esc="showSettings=false"><section class="table-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="table-settings-title"><button class="modal-close" :aria-label="t('common.close')" @click="showSettings=false">×</button><span class="eyebrow">{{ t('table.settings') }}</span><h2 id="table-settings-title">{{ t('table.settings') }}</h2><div class="settings-tabs" role="tablist" :aria-label="t('table.settingsSections')"><button id="settings-tab-table" role="tab" type="button" :aria-selected="settingsTab==='table'" aria-controls="settings-panel-table" @click="settingsTab='table'">{{ t('table.settingsTableTab') }}</button></div><section v-if="settingsTab==='table'" id="settings-panel-table" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-table"><label class="settings-toggle"><span><strong>{{ t('table.disableCustomPlaymats') }}</strong><small>{{ t('table.disableCustomPlaymatsDescription') }}</small></span><input type="checkbox" :checked="customPlaymatsDisabled" @change="emit('set-custom-playmats-disabled', ($event.target as HTMLInputElement).checked)"></label></section></section></div>
     <div v-if="showPlaymats" class="modal-scrim" @click.self="showPlaymats=false"><section class="playmat-modal" role="dialog" :aria-label="t('table.playmatDialog')"><button class="modal-close" :aria-label="t('common.close')" @click="showPlaymats=false">×</button><span class="eyebrow">{{ t('table.playmatEyebrow') }}</span><h2>{{ t('table.choosePlaymat') }}</h2><div class="playmat-preview"><PlaymatArt v-if="playmatDraft" :id="playmatDraft" class="playmat-preview-art" /><span>{{ PLAYMATS.find(item=>item.id===playmatDraft)?.name ?? t('table.greenFelt') }}</span></div><div class="playmat-options"><button class="playmat-choice felt-choice" :class="{selected:!playmatDraft}" @click="playmatDraft=undefined"><span class="playmat-choice-art">✳</span><strong>{{ t('table.greenFelt') }}</strong></button><button v-for="playmat in PLAYMATS" :key="playmat.id" class="playmat-choice" :class="{selected:playmatDraft===playmat.id}" @click="playmatDraft=playmat.id"><img :src="playmat.thumbnail" alt=""><strong>{{ playmat.name }}</strong></button></div><footer><a :href="PLAYMATS[0].source" target="_blank" rel="noreferrer">{{ t('table.officialMagicArt') }} ↗</a><button class="button button-primary" :disabled="busy" @click="applyPlaymat">{{ t('table.applyPlaymat') }}</button></footer></section></div>
     <div v-if="searchOpen" class="modal-scrim library-search-scrim" @click.self="searchOpen = false" @keydown.stop="onSearchKeys">
@@ -1861,6 +1806,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
         </div>
       </section>
     </div>
+    <Teleport to="body"><div v-if="cardTooltip && tooltipFace && !inspectionOpen && !contextMenu && !dragCard" class="table-card-tooltip" :style="{ left: `clamp(8px, ${cardTooltip.x + 8}px, max(8px, calc(100vw - 368px)))`, top: cardTooltip.y + 'px' }" aria-hidden="true"><span class="table-card-tooltip-copy"><strong>{{ tooltipFace.name }}</strong><small v-if="tooltipFace.type">{{ tooltipFace.type }}</small></span><ManaText v-if="tooltipFace.mana" :text="tooltipFace.mana" /></div></Teleport>
     <TableTutorial v-if="showTutorial" :hidden-preference="hideTutorial" @close="closeTutorial($event)" @shortcuts="closeTutorial($event, true)" />
     <div v-if="showHelp" class="modal-scrim" @click.self="showHelp=false"><section class="help-modal"><button class="modal-close" :aria-label="t('common.close')" @click="showHelp=false">×</button><span class="eyebrow">{{ t('table.commanderControls') }}</span><h2>{{ t('table.playYourWay') }}</h2><p>{{ t('table.helpIntro') }}</p><div class="shortcut-list"><div><kbd>ENTER</kbd><span>{{ t('chat.shortcut') }}</span></div><div><kbd>CTRL</kbd><kbd>D</kbd><span>{{ t('table.drawOne') }}</span></div><div><kbd>CTRL</kbd><kbd>Z</kbd><span>{{ t('table.undoAction') }}</span></div><div><kbd>CTRL</kbd><kbd>Y</kbd><span>{{ t('table.redoAction') }} (Ctrl + Shift + Z)</span></div><div><kbd>T</kbd><span>{{ t('table.tapSelected') }}</span></div><div><kbd>{{ t('table.middleMouse') }}</kbd><span>{{ t('table.tapMouse') }}</span></div><div><kbd>{{ t('table.doubleClick') }}</kbd><span>{{ t('table.tapMouse') }}</span></div><div><kbd>F</kbd><span>{{ t('table.flipSelected') }}</span></div><div><kbd>ALT</kbd><span>{{ t('table.targetShortcut') }}</span></div><div><kbd>LEFT MOUSE</kbd><span>{{ t('table.selectMove') }}</span></div><div><kbd>MOUSE</kbd><span>{{ t('table.lookAround') }}</span></div><div><kbd>SCROLL</kbd><span>{{ t('table.scrollHelp') }}</span></div><div><kbd>{{ t('table.rightMouse') }}</kbd><span>{{ t('table.contextHelp') }}</span></div><div><kbd>TOUCH</kbd><span>{{ t('table.touchPan') }}</span></div><div><kbd>ESC</kbd><span>{{ t('table.cancelSelection') }}</span></div></div><button class="button button-ghost tutorial-reopen" @click="openTutorial">{{ t('tutorial.reopen') }}</button><button class="button button-primary" @click="showHelp=false">{{ t('table.understood') }} <kbd>↵</kbd></button></section></div>
   </main>

@@ -26,4 +26,14 @@ describe('table targets', () => {
     expect(validTargetIntent({ ...base, origin: { kind: 'card', cardId: hand.id } }, state)).toBe(false);
     expect(validTargetIntent({ ...base, origin: base.target }, state)).toBe(false);
   });
+  it('only accepts a hidden hand card when it is in the temporary reveal set', () => {
+    const state = startDemoMatch('Lia', fixtureDecks());
+    const hand = Object.values(state.cards).find(item => item.zone === 'hand')!;
+    const target = { kind: 'card' as const, cardId: hand.id };
+    const intent = { id: crypto.randomUUID(), matchId: state.id, kind: 'highlight' as const, target };
+    expect(targetReferenceValid(target, state)).toBe(false);
+    expect(validTargetIntent(intent, state)).toBe(false);
+    expect(validTargetIntent(intent, state, new Set([hand.id]))).toBe(true);
+    expect(validTargetIntent(intent, state, new Set())).toBe(false);
+  });
 });

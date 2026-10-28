@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CardDefinition, DeckDefinition, MatchState } from './game';
 import { advanceTurn, applyAction, commandersForSeat, eligibleSeats, newMatch, publicProjection, privateProjection } from './game';
+import { restoreHistorySnapshot } from './history';
 
 function card(id: string, name: string, typeLine = 'Creature', cost = '{1}{G}'): CardDefinition {
   return { id, oracle_id: id, name, layout: 'normal', color_identity: typeLine.includes('Land') ? [] : ['G'], keywords: [], mana_cost: cost, type_line: typeLine, oracle_text: '', legalities: { commander: 'legal' } };
@@ -26,6 +27,45 @@ function keepAllHands(state: MatchState): MatchState {
 }
 
 describe('Commander table domain', () => {
+  it('reveals the library top publicly and returns cards in the chosen order', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.seats[0].id; const original = [...game.seats[0].library];
+    game = applyAction(game, actor, { type: 'OPEN_LIBRARY_REVEAL' });
+    game = applyAction(game, actor, { type: 'REVEAL_LIBRARY_TOP' });
+    const afterFirst = game;
+    game = applyAction(game, actor, { type: 'REVEAL_LIBRARY_TOP' });
+    const undone = restoreHistorySnapshot(afterFirst, game, actor, 'UNDO', 'reveal-undo');
+    expect(undone.seats[0].libraryRevealed).toEqual(original.slice(0, 1));
+    expect(undone.seats[0].library[0]).toBe(original[1]);
+    const redone = restoreHistorySnapshot(game, undone, actor, 'REDO', 'reveal-redo');
+    expect(redone.seats[0].libraryRevealed).toEqual(original.slice(0, 2));
+    expect(game.seats[0].libraryRevealed).toEqual(original.slice(0, 2));
+    expect(game.seats[0].library).toEqual(original.slice(2));
+    const view = publicProjection(game);
+    expect(view.cards[original[0]]?.zone).toBe('revealed');
+    expect(view.cards[original[2]]).toBeUndefined();
+    expect(() => applyAction(game, game.seats[1].id, { type: 'MOVE_CARD', cardId: original[0], zone: 'hand' })).toThrow();
+    expect(() => applyAction(game, actor, { type: 'CLOSE_LIBRARY_REVEAL' })).toThrow();
+    game = applyAction(game, actor, { type: 'MOVE_LIBRARY_REVEALED', cardIds: [original[1], original[0]], destination: 'top', close: true });
+    expect(game.seats[0].library.slice(0, 3)).toEqual([original[1], original[0], original[2]]);
+    expect(game.seats[0].libraryRevealOpen).toBe(false);
+    expect(publicProjection(game).cards[original[0]]).toBeUndefined();
+  });
+
+  it('moves individual and grouped reveals without losing the bottom order', () => {
+    let game = keepAllHands(newFourPlayerGame()); const actor = game.seats[0].id;
+    const original = [...game.seats[0].library];
+    game = applyAction(game, actor, { type: 'OPEN_LIBRARY_REVEAL' });
+    for (let i = 0; i < 3; i++) game = applyAction(game, actor, { type: 'REVEAL_LIBRARY_TOP' });
+    game = applyAction(game, actor, { type: 'MOVE_CARD', cardId: original[0], zone: 'battlefield' });
+    expect(game.seats[0].libraryRevealed).toEqual(original.slice(1, 3));
+    expect(() => applyAction(game, actor, { type: 'MOVE_LIBRARY_REVEALED', cardIds: [original[1], original[1]], destination: 'bottom' })).toThrow();
+    game = applyAction(game, actor, { type: 'MOVE_LIBRARY_REVEALED', cardIds: original.slice(1, 3), destination: 'bottom' });
+    expect(game.seats[0].library.slice(-2)).toEqual(original.slice(1, 3));
+    expect(game.cards[original[0]].zone).toBe('battlefield');
+    game.seats[0].library = [];
+    expect(() => applyAction(game, actor, { type: 'REVEAL_LIBRARY_TOP' })).toThrow();
+  });
   it.each([1, 2, 3, 4])('starts with exactly %i real players, even when occupied places are not consecutive', count => {
     const ids = ['northWest', 'southEast', 'southWest', 'northEast'].slice(0, count);
     const game = newMatch(ids.map(id => ({ seatId: id, name: id, deck: deckFor(id), participantUid: `uid-${id}` })), 1000, () => 0);
@@ -176,6 +216,17 @@ describe('Commander table domain', () => {
     }
   });
 
+  it('counts a commander moved directly from the command zone to the battlefield', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const player = game.seats[0];
+    const commander = Object.values(game.cards).find(card => card.ownerId === player.id && card.zone === 'command')!;
+    for (let count = 1; count <= 2; count++) {
+      game = applyAction(game, player.id, { type: 'MOVE_CARD', cardId: commander.id, zone: 'battlefield' });
+      game = applyAction(game, player.id, { type: 'MOVE_CARD', cardId: commander.id, zone: 'command' });
+      expect(game.seats[0].commanderCasts[commander.cardId]).toBe(count);
+    }
+  });
+
   it('keeps library search private, exposes the public count and records manual shuffle', () => {
     let game = keepAllHands(newFourPlayerGame());
     const own = game.seats.find(seat => seat.id === game.activeSeatId)!;
@@ -278,6 +329,46 @@ describe('Commander table domain', () => {
   const creatureToken = (name = 'Wolf'): CardDefinition => ({
     id: `scryfall-${name.toLowerCase()}`, oracle_id: `oracle-${name.toLowerCase()}`, name, layout: 'token', color_identity: ['G'], keywords: [],
     mana_cost: '', type_line: 'Token Creature — Wolf', oracle_text: '', power: '2', toughness: '2', image_uris: { small: 'https://cards.scryfall.io/small/front/example.jpg' }, legalities: {},
+  });
+
+  it('organizes lands in a column and separates support cards from creatures', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.activeSeatId;
+    const lands = Object.values(game.cards).filter(item => item.ownerId === actor && item.zone === 'library' && item.card?.type_line.includes('Land')).slice(0, 2);
+    const support = Object.values(game.cards).find(item => item.ownerId === actor && item.zone === 'library' && !lands.includes(item))!;
+    support.card = card('artifact', 'Artifact', 'Artifact');
+    for (const item of [...lands, support]) game = applyAction(game, actor, { type: 'MOVE_CARD', cardId: item.id, zone: 'battlefield' });
+    game = applyAction(game, actor, { type: 'CREATE_TOKEN', card: creatureToken() });
+    const [first, second] = lands.map(item => game.cards[item.id]);
+    const artifact = game.cards[support.id];
+    const token = Object.values(game.cards).find(item => item.isToken)!;
+    expect(first.x).toBe(second.x);
+    expect(second.y - first.y).toBeGreaterThanOrEqual(6);
+    expect(artifact.y).toBeLessThan(token.y);
+    expect(artifact.x).toBeGreaterThan(first.x);
+  });
+
+  it('positions resolved spells against the current field and respects explicit cast coordinates', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.activeSeatId;
+    const ids = game.seats.find(seat => seat.id === actor)!.hand.filter(id => game.cards[id].card?.type_line.includes('Creature')).slice(0, 2);
+    expect(ids).toHaveLength(2);
+    game = applyAction(game, actor, { type: 'CAST', cardId: ids[0] });
+    game = applyAction(game, actor, { type: 'CAST', cardId: ids[1], x: 70, y: 50 });
+    for (const seat of game.seats) game = applyAction(game, seat.id, { type: 'PASS_PRIORITY' });
+    expect(game.cards[ids[1]]).toMatchObject({ zone: 'battlefield', x: 70, y: 50 });
+    for (const seat of game.seats) game = applyAction(game, seat.id, { type: 'PASS_PRIORITY' });
+    expect(game.cards[ids[0]].zone).toBe('battlefield');
+    expect([game.cards[ids[0]].x, game.cards[ids[0]].y]).not.toEqual([70, 50]);
+  });
+
+  it('places multiple library-search results in distinct slots', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.activeSeatId;
+    const ids = game.seats.find(seat => seat.id === actor)!.library.filter(id => game.cards[id].card?.type_line.includes('Creature')).slice(0, 2);
+    game = applyAction(game, actor, { type: 'SEARCH_LIBRARY', cardIds: ids, destination: 'battlefield' });
+    expect(ids.map(id => game.cards[id].zone)).toEqual(['battlefield', 'battlefield']);
+    expect([game.cards[ids[0]].x, game.cards[ids[0]].y]).not.toEqual([game.cards[ids[1]].x, game.cards[ids[1]].y]);
   });
 
   it('creates a selected creature token with its full card data', () => {

@@ -26,7 +26,8 @@ onBeforeUnmount(cancel);
 </script>
 
 <template>
-  <span class="card-pose" :class="{ 'is-tapped': card.tapped, 'motion-reduced': reducedMotion }">
+  <span class="card-pose" style="position: relative" :class="{ 'is-tapped': card.tapped, 'motion-reduced': reducedMotion }">
     <span :key="flipSequence" class="card-face-motion" :class="{ 'is-flipping': flipping }"><CardTile :card="shownCard" :compact="true" /></span>
+    <slot />
   </span>
 </template>
