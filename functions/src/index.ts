@@ -1,14 +1,11 @@
-import { createHash, createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getDatabase } from 'firebase-admin/database';
 import { onCall, HttpsError, type CallableRequest, type FunctionsErrorCode } from 'firebase-functions/v2/https';
-import { defineSecret, defineString } from 'firebase-functions/params';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 
 const scrypt = promisify(scryptCallback);
-const turnSharedSecret = defineSecret('TURN_SHARED_SECRET');
-const turnHost = defineString('TURN_HOST', { default: '' });
 const MAX_MEMBERS = 12;
 const SEATS = ['northWest', 'northEast', 'southEast', 'southWest'] as const;
 const db = () => getDatabase(getApps()[0] ?? initializeApp());
@@ -270,23 +267,6 @@ export const roomControl = onCall({ region: 'us-central1', timeoutSeconds: 30 },
     return { hostUid: uid, generation: next.generation };
   }
   return fail('invalid-argument', 'Operação de mesa desconhecida.');
-});
-
-export const turnIce = onCall({ region: 'us-central1', secrets: [turnSharedSecret], timeoutSeconds: 10 }, async request => {
-  const uid = uidOf(request);
-  const roomId = safeId((request.data as { roomId?: unknown } | undefined)?.roomId, 'Identificador da mesa');
-  const member = await db().ref(`${roomPath(roomId)}/members/${uid}`).get();
-  const meta = await db().ref(`${roomPath(roomId)}/meta`).get();
-  if (!member.exists() || !meta.exists() || meta.child('closed').val() === true) return fail('permission-denied', 'Entre na mesa antes de solicitar conexão.');
-  const host = turnHost.value().trim();
-  const secret = turnSharedSecret.value();
-  if (!/^[a-z0-9.-]+$/i.test(host) || !host || !secret) return fail('unavailable', 'O servidor TURN não está configurado.');
-  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
-  const username = `${expiresAt}:${uid}`;
-  const credential = createHmac('sha1', secret).update(username).digest('base64');
-  return { expiresAt: expiresAt * 1000, iceServers: [
-    { urls: [`turn:${host}:3478?transport=udp`, `turn:${host}:3478?transport=tcp`, `turns:${host}:5349?transport=tcp`], username, credential },
-  ] };
 });
 
 // Presence expiry and room cleanup contain only membership/control metadata; game state remains on peer links.

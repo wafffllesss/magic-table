@@ -126,3 +126,5 @@ functions/.secret*
 test-results*/
 .codex/
 .firebaserc
+.wrangler/
+turn-worker/.dev.vars*

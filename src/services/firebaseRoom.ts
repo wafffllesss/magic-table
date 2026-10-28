@@ -22,6 +22,7 @@ export type RoomSnapshot = {
   membersReady?: boolean; queuePosition?: number; state?: MatchState; gameReady?: boolean; lastError?: string;
   roomId?: string; code?: string; name?: string; hostUid?: string; generation?: number;
   transport?: 'p2p' | 'firebase' | 'mixed';
+  connectionPeers?: Array<{ uid: string; name: string; route: 'direct' | 'turn' | 'firebase' | 'unknown' }>;
   selfRole?: 'player' | 'spectator'; connectionState?: 'connecting' | 'synchronizing' | 'connected' | 'reconnecting' | 'transferring' | 'disconnected'; memberCount?: number;
 };
 

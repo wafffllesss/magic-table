@@ -33,6 +33,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm exec wrangler deploy --dry-run --outdir .cache/turn-worker --config turn-worker/wrangler.jsonc
       - run: node --test scripts/release-version.test.mjs electron/updates.test.cjs
       - run: pnpm test:rules
       - run: pnpm test:e2e --workers=1
@@ -73,6 +74,7 @@ jobs:
       VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
       VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
       VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+      VITE_TURN_WORKER_URL: ${{ vars.VITE_TURN_WORKER_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

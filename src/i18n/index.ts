@@ -44,7 +44,7 @@ const messages = {
       retry: 'Try again', cards: 'cards | {count} card | {count} cards',
     },
     app: {
-      name: 'My Magic', connected: 'CONNECTED', reconnecting: 'RECONNECTING', leaveRoom: 'Leave room', directP2p: 'Direct connection', firebaseRelay: 'Firebase relay', mixedTransport: 'P2P + Firebase',
+      name: 'My Magic', connected: 'CONNECTED', reconnecting: 'RECONNECTING', leaveRoom: 'Leave room', directP2p: 'Direct connection', webrtc: 'WebRTC', firebaseRelay: 'Firebase relay', mixedTransport: 'P2P + Firebase', connectionWith: 'Connected to {name} ({route}).', connectionWaiting: 'Waiting for a connection to another player.', connectionChecking: 'Connecting to the host…', connectionRoutes: { direct: 'Direct', turn: 'TURN relay', firebase: 'Firebase relay', unknown: 'Checking connection' },
       storageWarning: 'Local storage is unavailable. This session will stay in memory and will not be saved when you close the app.',
       genericError: 'The action could not be completed.',
       playerName: 'Your name', playerNamePlaceholder: 'Your name at the table', nameContinue: 'Continue',
@@ -217,7 +217,7 @@ const messages = {
       retry: 'Tentar novamente', cards: 'cartas | {count} carta | {count} cartas',
     },
     app: {
-      name: 'Meu Magic', connected: 'CONECTADO', reconnecting: 'RECONECTANDO', leaveRoom: 'Sair da sala', directP2p: 'Conexão direta', firebaseRelay: 'Via Firebase', mixedTransport: 'P2P + Firebase',
+      name: 'Meu Magic', connected: 'CONECTADO', reconnecting: 'RECONECTANDO', leaveRoom: 'Sair da sala', directP2p: 'Conexão direta', webrtc: 'WebRTC', firebaseRelay: 'Via Firebase', mixedTransport: 'P2P + Firebase', connectionWith: 'Conectado com {name} ({route}).', connectionWaiting: 'Aguardando conexão com outra pessoa.', connectionChecking: 'Conectando ao anfitrião…', connectionRoutes: { direct: 'Direta', turn: 'Relay TURN', firebase: 'Relay Firebase', unknown: 'Verificando conexão' },
       storageWarning: 'Armazenamento local indisponível. Os dados desta sessão ficarão somente em memória e não serão salvos ao fechar.',
       genericError: 'Não foi possível concluir a ação.',
       playerName: 'Seu nome', playerNamePlaceholder: 'Seu nome na mesa', nameContinue: 'Continuar',

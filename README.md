@@ -33,7 +33,7 @@ The renderer uses Vue 3, TypeScript and a CSS 3D table. Mouse or touch gestures 
 
 ## Multiplayer and data
 
-For development, copy `.env.example` to `.env.local` and configure your own Firebase Web app. The project uses Authentication and Realtime Database for identity, room coordination and signaling; peer connections use WebRTC, with an optional coturn relay and Firebase fallback. Local emulators isolate development from production. See [multiplayer setup and privacy](docs/multiplayer-p2p.md) and [AI players via MCP](docs/mcp-ai-players.md).
+For development, copy `.env.example` to `.env.local` and configure your own Firebase Web app. The project uses Authentication and Realtime Database for identity, room coordination and signaling; peer connections use WebRTC, with an optional Cloudflare TURN relay and Firebase fallback. Local emulators isolate development from production. See [multiplayer setup and privacy](docs/multiplayer-p2p.md) and [AI players via MCP](docs/mcp-ai-players.md).
 
 IndexedDB stores local decks, preferences and a 200 MiB combined disposable card/image cache; decks are not evicted with cached images. Images load as needed. The app falls back to memory if IndexedDB is unavailable and warns that data will not persist. See [adaptive images](docs/adaptive-images.md).
 

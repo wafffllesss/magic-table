@@ -1,0 +1,11 @@
+{
+  "name": "magic-table-turn",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "vars": {
+    "FIREBASE_PROJECT_ID": "magic-table-a4c3a",
+    "FIREBASE_DATABASE_URL": "https://magic-table-a4c3a-default-rtdb.firebaseio.com/",
+    "CLOUDFLARE_TURN_KEY_ID": "6893712ffbffb4515681f16dc061279d"
+  }
+}

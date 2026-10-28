@@ -1,12 +1,12 @@
 # Multiplayer P2P
 
-The Electron app uses a star-shaped WebRTC topology: the host orders public changes and other participants keep local checkpoints. Firebase Authentication identifies participants; Realtime Database provides the directory, admission, members, presence, signaling and a temporary fallback channel. Peers try direct STUN and, when configured, coturn ICE relay. After 15 seconds with TURN (eight without it), an unopened connection falls back to Firebase. A definitive WebRTC failure falls back immediately; a transient close waits three seconds. Fallback remains active until that participant rejoins. All participants should use the same current version.
+The Electron app uses a star-shaped WebRTC topology: the host orders public changes and other participants keep local checkpoints. Firebase Authentication identifies participants; Realtime Database provides the directory, admission, members, presence, signaling and a temporary fallback channel. Peers try direct STUN and, when configured, Cloudflare TURN ICE relay. After 15 seconds with TURN (eight without it), an unopened connection falls back to Firebase. A definitive WebRTC failure falls back immediately; a transient close waits three seconds. Fallback remains active until that participant rejoins. All participants should use the same current version.
 
 ## Local development
 
 1. Copy `.env.example` to `.env.local` and fill in your own Firebase Web configuration. For local emulators, the following isolated demo values work without a production account. `pnpm emulator:p2p` starts Auth on port 9099 and Database on 9000.
-2. For local TURN issuance, build Functions and also start its emulator on port 5001, configuring `TURN_HOST` in `functions/.env` and `TURN_SHARED_SECRET` in `functions/.secret.local`. Without TURN the app can use STUN and Firebase fallback.
-3. Run `pnpm emulator:p2p`, then `pnpm desktop:dev` in another terminal. Use distinct Windows profiles or separate machines/VMs to test multiple Electron installations: one app instance runs per profile.
+2. Start `pnpm emulator:p2p`. Cloudflare TURN is optional; an HTTPS Worker URL may be set in `VITE_TURN_WORKER_URL` in `.env.local` for testing. Local Firebase emulator identities cannot authenticate against production Firebase; use a dedicated real Firebase project to test the deployed Worker.
+3. Start `pnpm desktop:dev` in another terminal. Use distinct Windows profiles or separate machines/VMs to test multiple Electron installations: one app instance runs per profile.
 
 ```dotenv
 VITE_FIREBASE_API_KEY=demo-key
@@ -23,21 +23,18 @@ Database rules restrict writes to authenticated members, protect seats and limit
 
 ## Operating your own services
 
-Create your own Firebase project with anonymous Authentication and Realtime Database, review and deploy the rules, and deploy the required Functions explicitly. Never deploy development changes to the maintainers' project. Optional room passwords are application-level checks and a modified client may bypass them; do not reuse passwords. Rooms whose host stops renewing presence disappear from the directory after expiry.
+Create your own Firebase project with anonymous Authentication and Realtime Database, review and deploy the rules. Never deploy development changes to the maintainers' project. Optional room passwords are application-level checks and a modified client may bypass them; do not reuse passwords. Rooms whose host stops renewing presence disappear from the directory after expiry.
 
-### Optional coturn relay
+### Optional Cloudflare TURN relay
 
-Coturn can relay WebRTC when direct connections fail, including symmetric NAT. It does not replace Firebase signaling. The client requests one-hour credentials from the `turnIce` callable, which checks room membership and signs `timestamp:uid` with HMAC-SHA1. The shared secret belongs only in Secret Manager and the private coturn configuration. The client refreshes credentials five minutes before expiry and restarts ICE; failures retain STUN and Firebase fallback.
+The Cloudflare Worker verifies Firebase ID tokens and checks room membership and the room's open status through Realtime Database before issuing TURN credentials. It keeps the Cloudflare token server-side. Credentials last one hour; clients refresh five minutes before expiry. STUN and Firebase fallback remain available if TURN is unavailable. This integration does not require Firebase Functions or Blaze.
 
-1. Provision a Linux host with a public IP, DNS such as `turn.example.com`, Docker and a TLS certificate. Copy `deploy/coturn/turnserver.conf.example` to `turnserver.conf`, set `TURN_HOST` and a long random `TURN_SHARED_SECRET`, and place the certificate and private key in `deploy/coturn/certs/` with restricted permissions. Behind NAT, configure `external-ip=PUBLIC_IP/PRIVATE_IP` and forward the same ports.
-2. Open 3478 UDP/TCP, 5349 TCP and 49152–50175 UDP. Start `docker compose -f deploy/coturn/compose.yaml up -d`. Monitor and update the server.
-3. In your own Firebase project, configure `TURN_HOST` in `functions/.env` and set the same shared secret with `pnpm exec firebase functions:secrets:set TURN_SHARED_SECRET`. Build with `pnpm --dir functions build` and deploy the callable explicitly to your own project. Cloud Functions requires Blaze; coturn hosting and traffic also have costs.
-4. Test separate networks and use `RTCPeerConnection.getStats()` to confirm the selected relay candidate. Test `turns:` where UDP is blocked and leave a room open beyond one hour to verify renewal. Local tests do not validate a real TURN server.
-
-The sample sets per-user and total quotas of 32 and 256, a per-session limit of 1 MiB/s per direction, and 64 MiB/s aggregate capacity. The 1,024-port UDP range also constrains allocations. Actual capacity depends on CPU, network, ICE candidates, spectators and outbound traffic; monitor real usage and adjust limits. A full room can have 11 peer links to the host.
-
-References: [coturn configuration](https://github.com/coturn/coturn/blob/master/README.turnserver), [Docker image](https://github.com/coturn/coturn/blob/master/docker/coturn/README.md), [Firebase secrets](https://firebase.google.com/docs/functions/config-env), [Functions quotas and pricing](https://firebase.google.com/docs/functions/quotas).
-
+1. Enable Workers Free and a workers.dev subdomain in your Cloudflare account, then create a TURN key in the Realtime dashboard. Keep its API token private. See [Cloudflare credential generation](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
+2. In `turn-worker/wrangler.jsonc`, set `FIREBASE_PROJECT_ID`, `FIREBASE_DATABASE_URL` (the HTTPS database URL from the Firebase console) and `CLOUDFLARE_TURN_KEY_ID`. These values are not secret. Use the same Firebase project as the app and ensure its Realtime Database rules are deployed.
+3. Run `pnpm exec wrangler login`, then `pnpm exec wrangler deploy --config turn-worker/wrangler.jsonc`. Set the TURN API token interactively with `pnpm exec wrangler secret put CLOUDFLARE_TURN_API_TOKEN --config turn-worker/wrangler.jsonc`; do not share it or commit it. See [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/). Record the public Worker URL.
+4. Set `VITE_TURN_WORKER_URL` to that HTTPS URL in `.env.local` for local app builds and in GitHub Actions Variables for releases. Rebuild the application; existing releases still use the old Function and cannot use the Worker. Never put the private token in a Vite variable or GitHub build configuration.
+5. Test separate networks and inspect the selected candidate pair using `RTCPeerConnection.getStats()`; a selected `relay` candidate confirms TURN is in use. Test beyond one hour and with UDP blocked to verify renewal and TCP/TLS. Automated tests and dry-run builds do not validate a live relay.
+6. Monitor Cloudflare Realtime and Workers usage and billing. TURN and SFU share the free monthly allowance; traffic beyond it may incur charges. See [Cloudflare pricing](https://developers.cloudflare.com/realtime/sfu/platform/pricing/) and [Workers limits](https://developers.cloudflare.com/workers/platform/limits/).
 ## Privacy and operation
 
 Hands, library order and face-down identities stay in local IndexedDB. Clients hold the public projection in memory. A participant returning without private data loses the seat and enters the next-game queue. Actions pause when a seated player goes offline; that player has up to 120 seconds to return with their identity and local checkpoint. Existing queued players have priority in the next game.

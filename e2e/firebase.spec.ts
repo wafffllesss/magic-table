@@ -102,6 +102,14 @@ test('synchronizes four players, protects hidden zones and restores the same pla
       }
       await expect(page.getByRole('button', { name: /Confirmar meu lugar/ })).toBeEnabled();
     }
+    await expect(pages[1].getByRole('status').filter({ hasText: /Conectado com Ana/ })).toBeVisible();
+    await expect(pages[0].getByRole('status').filter({ hasText: /Conectado com Bruno/ })).toBeVisible();
+    await expect(pages[1].getByRole('status').filter({ hasText: /Conectado com Ana/ })).toContainText(/\((Direta|Relay TURN|Relay Firebase)\)/);
+    await pages[1].screenshot({ path: 'test-results/lobby-connection-desktop.png' });
+    await pages[1].setViewportSize({ width: 390, height: 844 });
+    await expect(pages[1].getByRole('status').filter({ hasText: /Conectado com Ana/ })).toBeVisible();
+    await pages[1].screenshot({ path: 'test-results/lobby-connection-mobile.png' });
+    await pages[1].setViewportSize({ width: 1280, height: 720 });
     // Exercise the Firebase fallback in both directions even when WebRTC is available.
     const ids = await Promise.all(pages.slice(0, 2).map(page => page.evaluate(async () => {
       const { roomBackend } = await import('/src/services/roomBackend.ts');

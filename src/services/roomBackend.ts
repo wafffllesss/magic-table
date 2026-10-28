@@ -1,8 +1,8 @@
 import { getApps, initializeApp, type FirebaseOptions } from 'firebase/app';
 import { connectAuthEmulator, indexedDBLocalPersistence, initializeAuth, signInAnonymously, updateProfile, type Auth, type User } from 'firebase/auth';
 import { connectDatabaseEmulator, get, getDatabase, onChildAdded, onValue, onDisconnect, ref, remove, runTransaction, serverTimestamp, set, update, query, orderByChild, orderByKey, limitToLast, endAt, type Database, type Unsubscribe } from 'firebase/database';
-import { connectFunctionsEmulator, getFunctions, httpsCallable, type Functions } from 'firebase/functions';
 import type { PeerSignal, RoomDataBus, RoomSignalBus } from './peerTransport';
+import { requestTurnCredentials } from './turnWorker';
 
 export type RoomMember = { uid: string; name: string; role: 'player' | 'spectator'; seatId: string | null; memberSlot: number; joinedAt: number; ready: boolean; agent?: boolean; deckName?: string; deckSummary?: Array<{ cardId: string; name: string; role: 'commander' }>; playmatId?: string };
 export type RoomListing = { id: string; code: string; name: string; hostName: string; hostLeaseUntil?: number; playerCount: number; memberCount: number; locked: boolean; phase: string; createdAt: number; closed?: boolean };
@@ -59,10 +59,8 @@ export class RoomBackend implements RoomService {
   private app?: ReturnType<typeof initializeApp>;
   private auth?: Auth;
   private database?: Database;
-  private functions?: Functions;
   private user?: User;
   private emulatorConnected = false;
-  private functionsEmulatorConnected = false;
   private readonly sessionId = crypto.randomUUID();
   private presenceTimer?: ReturnType<typeof setInterval>;
   private presenceRef?: ReturnType<typeof ref>;
@@ -92,15 +90,7 @@ export class RoomBackend implements RoomService {
 
   async getIceServers(roomId: string): Promise<{ iceServers: RTCIceServer[]; expiresAt: number }> {
     if (!this.app || !this.user || this.activeRoomId !== roomId) throw new Error('Entre na mesa antes de solicitar conexão.');
-    this.functions ??= getFunctions(this.app, 'us-central1');
-    if (import.meta.env.DEV && env.VITE_FIREBASE_EMULATOR_HOST && !this.functionsEmulatorConnected) {
-      connectFunctionsEmulator(this.functions, env.VITE_FIREBASE_EMULATOR_HOST, Number(env.VITE_FIREBASE_FUNCTIONS_EMULATOR_PORT || 5001));
-      this.functionsEmulatorConnected = true;
-    }
-    const response = await httpsCallable<{ roomId: string }, { iceServers: RTCIceServer[]; expiresAt: number }>(this.functions, 'turnIce')({ roomId });
-    const result = response.data;
-    if (!Array.isArray(result?.iceServers) || !Number.isFinite(result.expiresAt) || result.expiresAt <= Date.now()) throw new Error('O servidor TURN retornou credenciais inválidas.');
-    return result;
+    return requestTurnCredentials(env.VITE_TURN_WORKER_URL, roomId, () => this.user!.getIdToken());
   }
 
   async create(name: string, playerName: string, password = ''): Promise<JoinedRoom> {

@@ -3,7 +3,7 @@
   "productName": "Meu Magic",
   "private": true,
   "type": "module",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "author": "Meu Magic",
   "description": "Mesa virtual para partidas casuais de Magic: The Gathering.",
   "main": "electron/main.cjs",
@@ -29,6 +29,7 @@
     "@modelcontextprotocol/server": "^2.4.0",
     "firebase": "^13.0.0",
     "idb": "^8.0.4",
+    "jose": "^6.2.13",
     "vue": "^3.5.44",
     "vue-i18n": "^11.4.14",
     "zod": "^4.6.7"
@@ -47,7 +48,8 @@
     "typescript": "5.9.3",
     "vite": "^8.3.4",
     "vitest": "5.0.4",
-    "vue-tsc": "3.2.5"
+    "vue-tsc": "3.2.5",
+    "wrangler": "^4.153.0"
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "packageManager": "pnpm@11.22.0"

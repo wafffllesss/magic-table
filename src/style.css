@@ -307,6 +307,7 @@
 .lobby-header .room-code-badge { position:static; flex:none; transform:none; }
 .lobby-header-actions { min-width:0; display:flex; align-items:center; justify-content:flex-end; gap:10px; }
 .lobby-header-actions .language-selector { margin-left:0; }
+.lobby-connections { display:flex; flex-wrap:wrap; gap:4px 16px; margin:0 0 12px; color:#a5b6a3; font-size:11px; line-height:1.5; }
 @media (max-width:700px) {
   .lobby-header { min-height:59px; padding:8px 14px; gap:8px; }
   .lobby-header .table-brand { max-width:none; overflow:visible; gap:6px; font-size:10px; }

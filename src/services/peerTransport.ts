@@ -11,7 +11,8 @@ export interface RoomDataBus {
   sendPresence(peerUid: string, generation: number, linkId: string, payload: unknown): Promise<void>;
   subscribePresence(peerUid: string, generation: number, linkId: string, receive: (payload: unknown) => void): () => void;
 }
-type PeerLink = { peerUid: string; linkId: string; pc: RTCPeerConnection; reliable?: RTCDataChannel; ephemeral?: RTCDataChannel; assembler: RoomPacketAssembler; pendingCandidates: RTCIceCandidateInit[]; remoteReady: boolean; sequence: number; incomingSequence: number; relay?: boolean; relayUnsubscribe?: () => void; relayPresenceUnsubscribe?: () => void; signalQueue: Promise<void>; sendQueue: Promise<void>; queuedBytes: number; seenIds: Set<string> };
+export type PeerConnectionRoute = 'direct' | 'turn' | 'firebase' | 'unknown';
+type PeerLink = { peerUid: string; linkId: string; pc: RTCPeerConnection; reliable?: RTCDataChannel; ephemeral?: RTCDataChannel; assembler: RoomPacketAssembler; pendingCandidates: RTCIceCandidateInit[]; remoteReady: boolean; sequence: number; incomingSequence: number; relay?: boolean; route?: PeerConnectionRoute; routeCheck?: number; routeAttempts?: number; routeTimer?: ReturnType<typeof setTimeout>; relayUnsubscribe?: () => void; relayPresenceUnsubscribe?: () => void; signalQueue: Promise<void>; sendQueue: Promise<void>; queuedBytes: number; seenIds: Set<string> };
 const NO_DATA_BUS: RoomDataBus = {
   send: async () => { throw new Error('A reserva pelo Firebase não está disponível.'); },
   subscribe: () => () => {},
@@ -30,6 +31,8 @@ export class PeerTransport extends EventTarget {
   private iceExpiresAt = 0;
   private iceLoad?: Promise<void>;
   private iceRefreshTimer?: ReturnType<typeof setTimeout>;
+  private iceRetryAt = 0;
+  private iceRetryDelay = 30000;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private closing = false;
   private offered = new Set<string>();
@@ -137,6 +140,35 @@ export class PeerTransport extends EventTarget {
 
   get connectedPeerUids(): string[] { return [...this.peers.entries()].filter(([, link]) => this.isConnected(link)).map(([uid]) => uid); }
   get relayPeerUids(): string[] { return [...this.peers.entries()].filter(([, link]) => link.relay).map(([uid]) => uid); }
+  connectionRoute(uid: string): PeerConnectionRoute | undefined {
+    const link = this.peers.get(uid);
+    return link && this.isConnected(link) ? link.relay ? 'firebase' : link.route ?? 'unknown' : undefined;
+  }
+
+  private async updateConnectionRoute(link: PeerLink): Promise<void> {
+    const check = link.routeCheck = (link.routeCheck ?? 0) + 1;
+    try {
+      const stats = await link.pc.getStats();
+      let pair: any;
+      stats.forEach(report => { if (report.type === 'transport' && report.selectedCandidatePairId) pair = stats.get(report.selectedCandidatePairId); });
+      if (!pair) stats.forEach(report => { if (report.type === 'candidate-pair' && report.selected === true) pair = report; });
+      const local = pair && stats.get(pair.localCandidateId), remote = pair && stats.get(pair.remoteCandidateId);
+      const known = ['host', 'srflx', 'prflx', 'relay'];
+      const route: PeerConnectionRoute = known.includes(local?.candidateType) && known.includes(remote?.candidateType)
+        ? local.candidateType === 'relay' || remote.candidateType === 'relay' ? 'turn' : 'direct' : 'unknown';
+      if (this.peers.get(link.peerUid) !== link || link.relay || check !== link.routeCheck || !this.isConnected(link)) return;
+      if (link.route !== route) { link.route = route; this.emitState(); }
+      if (route === 'unknown') this.retryConnectionRoute(link);
+    } catch {
+      if (this.peers.get(link.peerUid) === link && !link.relay && check === link.routeCheck && this.isConnected(link) && link.route !== 'unknown') { link.route = 'unknown'; this.emitState(); }
+      if (this.peers.get(link.peerUid) === link && !link.relay && check === link.routeCheck && this.isConnected(link)) this.retryConnectionRoute(link);
+    }
+  }
+  private retryConnectionRoute(link: PeerLink): void {
+    if (link.routeTimer || (link.routeAttempts ?? 0) >= 5) return;
+    link.routeAttempts = (link.routeAttempts ?? 0) + 1;
+    link.routeTimer = setTimeout(() => { link.routeTimer = undefined; if (this.peers.get(link.peerUid) === link && !link.relay && this.isConnected(link)) void this.updateConnectionRoute(link); }, 2000);
+  }
 
   async close(): Promise<void> {
     this.closing = true;
@@ -244,12 +276,14 @@ export class PeerTransport extends EventTarget {
   }
 
   private async prepareIceServers(): Promise<void> {
-    if (!this.loadIceServers || Date.now() + 300_000 < this.iceExpiresAt) return;
+    if (!this.loadIceServers || Date.now() < this.iceRetryAt || Date.now() + 300_000 < this.iceExpiresAt) return;
     this.iceLoad ??= this.loadIceServers().then(({ iceServers, expiresAt }) => {
       if (this.closing) return;
       if (!Array.isArray(iceServers) || expiresAt <= Date.now()) throw new Error('Credenciais TURN inválidas.');
       this.iceServers = [...ICE_SERVERS_DIRECT, ...iceServers];
       this.iceExpiresAt = expiresAt;
+      this.iceRetryAt = 0;
+      this.iceRetryDelay = 30000;
       for (const link of this.peers.values()) {
         if (link.relay || link.pc.signalingState === 'closed') continue;
         link.pc.setConfiguration({ ...link.pc.getConfiguration(), iceServers: this.iceServers });
@@ -260,10 +294,12 @@ export class PeerTransport extends EventTarget {
     }).catch(error => {
       if (this.closing) return;
       if (this.iceExpiresAt <= Date.now()) this.iceServers = ICE_SERVERS_DIRECT;
-      this.iceExpiresAt = Date.now() + 30_000;
+      const delay = Math.min(300000, Math.round(this.iceRetryDelay * (0.9 + Math.random() * 0.2)));
+      this.iceRetryAt = Date.now() + delay;
+      this.iceRetryDelay = Math.min(300000, this.iceRetryDelay * 2);
       this.reportError(error);
       if (this.iceRefreshTimer) clearTimeout(this.iceRefreshTimer);
-      this.iceRefreshTimer = setTimeout(() => { void this.prepareIceServers(); }, 30_000);
+      this.iceRefreshTimer = setTimeout(() => { void this.prepareIceServers(); }, delay);
     }).finally(() => { this.iceLoad = undefined; });
     await this.iceLoad;
   }
@@ -278,7 +314,13 @@ export class PeerTransport extends EventTarget {
     pc.onconnectionstatechange = () => {
       if (this.peers.get(uid) !== link) return;
       this.emitState();
+      if (pc.connectionState === 'connected') void this.updateConnectionRoute(link);
       if (pc.connectionState === 'failed') this.scheduleFallback(link, 0);
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (this.peers.get(uid) !== link || link.relay) return;
+      if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'disconnected') { link.routeCheck = (link.routeCheck ?? 0) + 1; link.routeAttempts = 0; if (link.routeTimer) clearTimeout(link.routeTimer); link.routeTimer = undefined; link.route = 'unknown'; this.emitState(); }
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') void this.updateConnectionRoute(link);
     };
     pc.ondatachannel = event => this.bindChannel(link, event.channel);
     pc.onnegotiationneeded = () => {
@@ -294,6 +336,7 @@ export class PeerTransport extends EventTarget {
       if (this.peers.get(link.peerUid) !== link) return;
       if (channel.label === 'room-state') this.clearFallback(link.peerUid);
       this.emitState();
+      if (channel.label === 'room-state') void this.updateConnectionRoute(link);
       if (channel.label === 'room-state') this.dispatchEvent(new CustomEvent('peer-open', { detail: { peerUid: link.peerUid } }));
     };
     channel.onclose = () => { if (this.peers.get(link.peerUid) !== link) return; this.emitState(); if (channel.label === 'room-state') this.scheduleFallback(link, 3_000); };
@@ -376,6 +419,7 @@ export class PeerTransport extends EventTarget {
 
   private async activateRelay(link: PeerLink): Promise<void> {
     if (this.peers.get(link.peerUid) !== link || link.relay) return;
+    if (link.routeTimer) clearTimeout(link.routeTimer);
     link.relay = true;
     link.sequence = 0;
     link.incomingSequence = 0;
@@ -440,6 +484,7 @@ export class PeerTransport extends EventTarget {
     this.dispatchEvent(new CustomEvent('error', { detail: error instanceof Error ? error : new Error('Falha na conexão com a sala.') }));
   }
   private disposeLink(link: PeerLink): void {
+    if (link.routeTimer) clearTimeout(link.routeTimer);
     this.clearFallback(link.peerUid);
     const presenceTimer = this.presenceTimers.get(link.peerUid);
     if (presenceTimer) clearTimeout(presenceTimer);

@@ -973,8 +973,13 @@ export class PeerRoom extends EventTarget {
     const relayed = this.transport?.relayPeerUids.length ?? 0;
     const direct = (this.transport?.connectedPeerUids.length ?? 0) - relayed;
     const transport = this.transport?.connectedPeerUids.length ? relayed && direct ? 'mixed' : relayed ? 'firebase' : 'p2p' : undefined;
+    const connectionPeers = this.members.flatMap(member => {
+      if (member.uid === this.backend.uid || (!this.isHost() && member.uid !== this.snapshot?.hostUid)) return [];
+      const route = this.transport?.connectionRoute(member.uid);
+      return route ? [{ uid: member.uid, name: member.name, route }] : [];
+    });
     this.patchSnapshot({ connectionState: reconnecting ? 'reconnecting' : this.snapshot.hostUid === this.backend.uid && this.members.length === 1 ? 'connected' : this.transport?.connectedPeerUids.length || this.isHost() ? 'connected' : 'connecting', online: true, transport,
-      lastError: reconnecting ? this.snapshot.lastError : undefined });
+      connectionPeers, lastError: reconnecting ? this.snapshot.lastError : undefined });
   }
   private isOnline(uid: string): boolean { return Object.values(this.presence[uid] ?? {}).some(session => session.online === true); }
   private isHost(): boolean { return this.snapshot?.hostUid === this.backend.uid; }

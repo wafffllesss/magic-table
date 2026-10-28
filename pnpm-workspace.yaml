@@ -4,6 +4,7 @@ allowBuilds:
   electron-winstaller: false
   esbuild: true
   protobufjs: true
+  workerd: true
   # Optional native dependency used by Firebase's local Hosting emulator.
   re2: true
 minimumReleaseAgeExclude:

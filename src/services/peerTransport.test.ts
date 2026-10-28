@@ -17,6 +17,41 @@ function transport(): any {
 afterEach(() => vi.useRealTimers());
 
 describe('peer delivery', () => {
+  it('reports the actual selected ICE route, Firebase fallback and unknown statistics', async () => {
+    const t = transport();
+    const records = (local: string, remote: string) => new Map<string, any>([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: local }], ['remote', { type: 'remote-candidate', candidateType: remote }],
+    ]);
+    const pc = { getStats: vi.fn().mockResolvedValueOnce(records('host', 'srflx')).mockResolvedValueOnce(records('host', 'relay')).mockResolvedValueOnce(new Map()), close: vi.fn() };
+    const link: any = { peerUid: 'peer', pc, reliable: { readyState: 'open' } };
+    t.peers.set('peer', link);
+    await t.updateConnectionRoute(link);
+    expect(t.connectionRoute('peer')).toBe('direct');
+    await t.updateConnectionRoute(link);
+    expect(t.connectionRoute('peer')).toBe('turn');
+    await t.updateConnectionRoute(link);
+    expect(t.connectionRoute('peer')).toBe('unknown');
+    link.relay = true;
+    expect(t.connectionRoute('peer')).toBe('firebase');
+    await t.close();
+    expect(t.connectionRoute('peer')).toBeUndefined();
+  });
+
+  it('ignores stale ICE statistics after Firebase fallback or peer replacement', async () => {
+    const t = transport();
+    let finish!: (value: Map<string, unknown>) => void;
+    const pc = { getStats: () => new Promise(resolve => { finish = resolve; }), close: vi.fn() };
+    const link: any = { peerUid: 'peer', pc, reliable: { readyState: 'open' } };
+    t.peers.set('peer', link);
+    const pending = t.updateConnectionRoute(link);
+    link.relay = true;
+    finish(new Map());
+    await pending;
+    expect(t.connectionRoute('peer')).toBe('firebase');
+    await t.close();
+  });
   it('requests a fresh offer when the host starts again', async () => {
     const host = transport();
     const send = vi.fn(async () => {});
@@ -59,6 +94,40 @@ describe('peer delivery', () => {
     expect(t.iceServers).toEqual([{ urls: 'stun:stun.cloudflare.com:3478' }]);
     expect(errors).toEqual(['TURN indisponível']);
     await t.close();
+  });
+
+  it('refreshes TURN credentials before expiry and restarts an active guest connection', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn().mockImplementation(async () => ({ iceServers: [{ urls: 'turn:turn.cloudflare.com:3478?transport=udp', username: 'user', credential: `token-${load.mock.calls.length}` }], expiresAt: Date.now() + 3_600_000 }));
+    const t: any = new PeerTransport('room', 'guest', 'host', 1, { send: async () => {}, subscribe: () => () => {} }, undefined, load);
+    const pc = { signalingState: 'stable', setConfiguration: vi.fn(), getConfiguration: () => ({}), restartIce: vi.fn(), close: vi.fn() };
+    t.peers.set('host', { pc, remoteReady: true });
+    await t.prepareIceServers();
+    await vi.advanceTimersByTimeAsync(3_300_000);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(pc.setConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({ iceServers: expect.arrayContaining([expect.objectContaining({ credential: 'token-2' })]) }));
+    expect(pc.restartIce).toHaveBeenCalledTimes(2);
+    await t.close();
+  });
+
+  it('backs off repeated TURN failures and cancels retry when closed', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const load = vi.fn().mockRejectedValue(new Error('offline'));
+    const t: any = new PeerTransport('room', 'guest', 'host', 1, { send: async () => {}, subscribe: () => () => {} }, undefined, load);
+    await t.prepareIceServers();
+    await t.prepareIceServers();
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(t.iceServers).toEqual([{ urls: 'stun:stun.cloudflare.com:3478' }]);
+    await t.close();
+    await vi.advanceTimersByTimeAsync(600000);
+    expect(load).toHaveBeenCalledTimes(3);
   });
 
   it('requests Firebase fallback after a failed direct link and cancels the timer on close', async () => {
