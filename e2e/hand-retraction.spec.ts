@@ -270,7 +270,7 @@ test.describe('touch hand', () => {
     await page.touchscreen.tap(5, 150);
     await expect(hand).not.toHaveClass(/is-expanded/);
     await revealHand(page, true);
-    await page.evaluate(() => { (window as any).handFixture.state.value.phase = 'mulligan'; });
+    await page.evaluate(() => { const state = (window as any).handFixture.state.value; state.phase = 'mulligan'; state.seats.find((seat: any) => seat.id === 'southWest').mulligans = 2; });
     await hand.locator('.fan-card').last().tap();
     await expect(hand.locator('.mulligan-bottom')).toHaveCount(1);
   });
