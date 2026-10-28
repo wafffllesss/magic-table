@@ -47,9 +47,10 @@ test('shows five recent events and opens every retained log entry in an accessib
   await expect(preview.locator('.action-log-preview-entry')).toHaveCount(1);
   const increaseLife = page.getByRole('button', { name: 'Aumentar vida de Lia', exact: true });
   const life = page.getByRole('region', { name: 'Vida de Lia', exact: true }).locator('.seat-life-value');
+  await increaseLife.focus();
   for (let index = 0; index < 6; index++) {
     await expect(increaseLife).toBeEnabled();
-    await increaseLife.click({ force: true });
+    await increaseLife.press('Enter');
     await expect(life).toHaveText(String(41 + index));
   }
   await expect(preview.locator('.action-log-preview-entry')).toHaveCount(5);
