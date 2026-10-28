@@ -78,21 +78,39 @@ jobs:
       - name: Check publication prerequisites
         if: steps.version.outputs.complete != 'true'
         run: node scripts/release-prerequisites.mjs
-      - name: Install dependencies
-        if: steps.version.outputs.complete != 'true'
-        run: pnpm install --frozen-lockfile
       - name: Set build version
         if: steps.version.outputs.complete != 'true'
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.RELEASE_VERSION; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
+      - name: Install dependencies
+        if: steps.version.outputs.complete != 'true'
+        run: pnpm install --frozen-lockfile
       - name: Validate changelog files
         if: steps.version.outputs.complete != 'true'
         run: node scripts/validate-changelogs.mjs ${{ steps.version.outputs.version }}
+      - name: Compile application
+        if: steps.version.outputs.complete != 'true'
+        timeout-minutes: 5
+        run: |
+          node node_modules/vue-tsc/bin/vue-tsc.js --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/vite/bin/vite.js build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare Electron and MCP server
+        if: steps.version.outputs.complete != 'true'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-electron-mcp.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build portable executable
         if: steps.version.outputs.complete != 'true'
-        run: pnpm desktop:make
+        timeout-minutes: 20
+        run: node scripts/make-desktop.cjs
       - name: Include release notes
         if: steps.version.outputs.complete != 'true'
         shell: pwsh
