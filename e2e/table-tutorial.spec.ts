@@ -52,7 +52,7 @@ test('tutorial works on a narrow screen with reduced motion and in English', asy
   await page.getByLabel('Your name', { exact: true }).fill('Lia');
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByRole('button', { name: 'Choose Forged in Stone', exact: true }).click();
-  await page.locator('.room-demo').getByRole('button', { name: 'Play', exact: true }).click();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Look around' });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator('.tutorial-board')).toHaveCSS('animation-name', 'none');

@@ -32,6 +32,7 @@ async function mockOnline(page: Page, phase = 'lobby'): Promise<void> {
       { id: 'b', code: 'LOCKROOM', name: 'Mesa com senha', hostName: 'Bia', playerCount: 4, memberCount: 5, locked: true, phase: 'playing', createdAt: 2 },
       { id: 'c', code: 'CLOSED00', name: 'Mesa encerrada', closed: true, playerCount: 0, memberCount: 0, locked: false, phase: 'lobby', createdAt: 3 },
     ];
+    roomBackend.setPlaymat = async () => {};
     roomBackend.connectIdentity = async () => 'test';
     roomBackend.watchDirectory = receive => { receive(rooms); return () => {}; };
     roomBackend.list = async () => ({ rooms, nextCursor: null });
@@ -71,30 +72,30 @@ test('validates name, advances with Enter and restores the chosen deck after rel
   await page.getByLabel('Seu nome', { exact: true }).press('Enter');
   await expect(page.locator('.workshop-shell')).toBeVisible();
   await page.locator('.starter-card').first().getByRole('button', { name: /^Escolher / }).click();
-  await expect(page.locator('.room-directory-card').first()).toContainText('Demonstração local');
+  await expect(page.getByRole('button', { name: 'DEMO', exact: true })).toBeVisible();
   await expect(page.locator('.entry-form, .workshop-shell')).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Jogos', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Lia Silva · Alterar nome/ })).toBeVisible();
+  await expect(page.locator('.profile-player strong').filter({ hasText: 'Lia Silva' })).toBeVisible();
 });
 
 test('cancel preserves name and deck, changes persist, and demo returns to games', async ({ page }) => {
   await seed(page); await choose(page);
-  const previous = await page.getByRole('button', { name: /Trocar deck/ }).innerText();
+  const previous = await page.locator('.profile-deck').innerText();
   await page.getByRole('button', { name: /Alterar nome/ }).click();
   await page.getByLabel('Seu nome', { exact: true }).fill('Outro nome');
   await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Lia · Alterar nome/ })).toBeVisible();
+  await expect(page.locator('.profile-player strong').filter({ hasText: 'Lia' })).toBeVisible();
   await page.getByRole('button', { name: /Trocar deck/ }).click();
   await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Trocar deck/ })).toHaveText(previous);
+  await expect(page.locator('.profile-deck')).toHaveText(previous);
   await page.getByRole('button', { name: /Alterar nome/ }).click();
   await page.getByLabel('Seu nome', { exact: true }).fill('Ana');
   await page.getByRole('button', { name: 'Continuar', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
+  await expect(page.locator('.profile-player strong').filter({ hasText: 'Ana' })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('button', { name: /Ana · Alterar nome/ })).toBeVisible();
-  await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
+  await expect(page.locator('.profile-player strong').filter({ hasText: 'Ana' })).toBeVisible();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
   await expect(page.locator('.player-mat')).toHaveCount(4);
   await page.getByRole('button', { name: /sair da mesa/i }).click();
   await expect(page.getByRole('heading', { name: 'Jogos', exact: true })).toBeVisible();
@@ -117,7 +118,7 @@ for (const invalid of ['removed', 'invalid']) {
 
 test('lists rooms, hides closed rooms and requests the password in context', async ({ page }) => {
   await seed(page); await mockOnline(page); await choose(page);
-  await expect(page.locator('.room-directory-card')).toHaveCount(3);
+  await expect(page.locator('.room-directory-card')).toHaveCount(2);
   await expect(page.getByText('Mesa encerrada')).toHaveCount(0);
   await expect(page.locator('.room-create-form')).toHaveCount(0);
   await page.locator('.room-directory-card').filter({ hasText: 'Mesa com senha' }).getByRole('button').click();
@@ -125,7 +126,7 @@ test('lists rooms, hides closed rooms and requests the password in context', asy
   await page.getByLabel('Senha, se houver').fill('wrong');
   await page.locator('form').getByRole('button', { name: 'Entrar na mesa', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Senha incorreta');
-  await expect(page.locator('.room-demo')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'DEMO', exact: true })).toBeVisible();
 });
 
 test('auto applies deck and allows retry without enabling ready before success', async ({ page }) => {
@@ -168,7 +169,7 @@ for (const width of [1440, 390]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('decks.png'), fullPage: true });
     await page.locator('.starter-card').first().getByRole('button', { name: /^Escolher / }).click();
-    await expect(page.locator('.room-demo')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'DEMO', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('games.png'), fullPage: true });
   });
@@ -185,10 +186,10 @@ test('keeps the demo usable when the directory fails and persists a changed deck
   await expect(page.getByText('Diretório indisponível', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: /Trocar deck/ }).click();
   await page.getByRole('button', { name: 'Escolher Family Matters', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Family Matters · Trocar deck/ })).toBeVisible();
+  await expect(page.locator('.profile-deck').filter({ hasText: 'Family Matters' })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('button', { name: /Family Matters · Trocar deck/ })).toBeVisible();
-  await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
+  await expect(page.locator('.profile-deck').filter({ hasText: 'Family Matters' })).toBeVisible();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
   await expect(page.getByRole('button', { name: "Comandante: Zinnia, Valley's Voice", exact: true })).toBeVisible();
 });
 

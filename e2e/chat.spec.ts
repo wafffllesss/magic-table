@@ -18,6 +18,7 @@ test('composes chat in the lobby and shows bubbles through the table transition'
     const { peerRoom } = await import(resources.find(url => url.includes('/src/services/peerRoom.ts')) ?? '/src/services/peerRoom.ts');
     Object.defineProperty(roomBackend, 'isConfigured', { get: () => true });
     Object.defineProperty(roomBackend, 'uid', { get: () => 'player' });
+    roomBackend.setPlaymat = async () => {};
     roomBackend.connectIdentity = async () => 'player';
     roomBackend.watchDirectory = () => () => {};
     roomBackend.list = async () => ({ rooms: [], nextCursor: null });

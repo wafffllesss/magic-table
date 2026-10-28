@@ -65,7 +65,7 @@
               ".validate": "!newData.exists() || newData.hasChildren()"
             },
             "playmatId": {
-              ".validate": "!newData.exists() || newData.val() === 'azorius' || newData.val() === 'orzhov' || newData.val() === 'dimir' || newData.val() === 'izzet' || newData.val() === 'rakdos' || newData.val() === 'golgari' || newData.val() === 'gruul' || newData.val() === 'boros' || newData.val() === 'selesnya' || newData.isString() && newData.val().length <= 2048 && (newData.val().matches(/^color:#[0-9a-fA-F]{6}$/) || newData.val().matches(/^image:https?:\\/\\/[^\\s]+$/))"
+              ".validate": "!newData.exists() || newData.val() === 'azorius' || newData.val() === 'orzhov' || newData.val() === 'dimir' || newData.val() === 'izzet' || newData.val() === 'rakdos' || newData.val() === 'golgari' || newData.val() === 'gruul' || newData.val() === 'boros' || newData.val() === 'selesnya' || newData.isString() && newData.val().length <= 2048 && (newData.val().matches(/^color:#[0-9a-fA-F]{6}$/) || newData.val().matches(/^image:https?:\\/\\/[^ ]+$/))"
             },
             "memberSlot": {
               ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 12 && root.child('p2pRooms/' + $room + '/memberClaims/' + newData.val()).val() === $uid"
@@ -160,7 +160,7 @@
                 ".validate": "!newData.exists() || newData.isBoolean()"
               },
               "playmatId": {
-                ".validate": "!newData.exists() || newData.val() === 'azorius' || newData.val() === 'orzhov' || newData.val() === 'dimir' || newData.val() === 'izzet' || newData.val() === 'rakdos' || newData.val() === 'golgari' || newData.val() === 'gruul' || newData.val() === 'boros' || newData.val() === 'selesnya' || newData.isString() && newData.val().length <= 2048 && (newData.val().matches(/^color:#[0-9a-fA-F]{6}$/) || newData.val().matches(/^image:https?:\\/\\/[^\\s]+$/))"
+                ".validate": "!newData.exists() || newData.val() === 'azorius' || newData.val() === 'orzhov' || newData.val() === 'dimir' || newData.val() === 'izzet' || newData.val() === 'rakdos' || newData.val() === 'golgari' || newData.val() === 'gruul' || newData.val() === 'boros' || newData.val() === 'selesnya' || newData.isString() && newData.val().length <= 2048 && (newData.val().matches(/^color:#[0-9a-fA-F]{6}$/) || newData.val().matches(/^image:https?:\\/\\/[^ ]+$/))"
               },
               "deckSummary": {
                 ".validate": "!newData.exists() || newData.hasChildren()"

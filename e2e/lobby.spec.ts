@@ -10,6 +10,7 @@ async function openConnectedLibrary(page: Page, decks = preconFixtureDecks()): P
     const { peerRoom } = await import(performance.getEntriesByType('resource').map(entry => entry.name).find(url => url.includes('/src/services/peerRoom.ts')) ?? '/src/services/peerRoom.ts');
     const { roomBackend } = await import(performance.getEntriesByType('resource').map(entry => entry.name).find(url => url.includes('/src/services/roomBackend.ts')) ?? '/src/services/roomBackend.ts');
     Object.defineProperty(roomBackend, 'isConfigured', { get: () => true });
+    roomBackend.setPlaymat = async () => {};
     roomBackend.connectIdentity = async () => 'test-player';
     roomBackend.watchDirectory = () => () => {};
     roomBackend.list = async () => ({ rooms: [], nextCursor: null });

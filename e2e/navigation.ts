@@ -30,6 +30,6 @@ export async function startLocalDemo(page: Page, preserveTutorial = false): Prom
     await openLibrary(page);
     await page.getByRole('button', { name: 'Escolher Forged in Stone', exact: true }).click();
   }
-  await page.locator('.room-demo').getByRole('button', { name: 'Jogar', exact: true }).click();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
   await expect(page.locator('.player-mat')).toHaveCount(4);
 }

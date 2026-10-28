@@ -27,7 +27,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await expect(page.getByRole('heading', { name: 'Draconic Domination', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: /FONTE OFICIAL/ })).toHaveAttribute('href', PRECONS[13].sourceUrl);
     await page.getByRole('button', { name: /Usar este deck/ }).click();
-    await expect(page.getByRole('button', { name: /Draconic Domination · Trocar deck/ })).toBeVisible();
+    await expect(page.locator('.profile-deck').filter({ hasText: 'Draconic Domination' })).toBeVisible();
   });
 }
 
