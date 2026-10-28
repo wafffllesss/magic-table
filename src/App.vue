@@ -140,10 +140,17 @@ const activeChat = computed(() => visibleChat(chatMessages.value, chatNow.value)
 const room = ref<RoomSnapshot>({ seats: {}, queue: [], online: false });
 const onlineMode = ref(false);
 const notificationTracker = new RoomNotificationTracker();
-const notificationPermission = ref(typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+const notificationPermission = ref(window.meuMagicDesktop ? 'granted' : typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
+const notificationsEnabled = ref(true);
 async function enableNotifications(): Promise<void> {
   if (typeof Notification === 'undefined') return;
   try { notificationPermission.value = await Notification.requestPermission(); } catch { notificationPermission.value = 'unsupported'; }
+  if (notificationPermission.value === 'granted') { notificationsEnabled.value = true; await localRepository.setPreference('notifications-enabled', true); }
+}
+async function setNotificationsEnabled(enabled: boolean): Promise<void> {
+  if (enabled && !window.meuMagicDesktop && notificationPermission.value !== 'granted') { await enableNotifications(); return; }
+  notificationsEnabled.value = enabled;
+  await localRepository.setPreference('notifications-enabled', enabled);
 }
 const showNotificationButton = computed(() => !window.meuMagicDesktop && notificationPermission.value === 'default');
 watch(() => room.value.connectionState, value => { if (onlineMode.value && (value === 'reconnecting' || value === 'disconnected')) clearTargets(); });
@@ -223,6 +230,7 @@ onMounted(async () => {
   selectedDeck.value = localDecks.value.find(deck => deck.id === deckId && deckIsValid(deck));
   preferredPlaymat.value = validPlaymatId(await localRepository.getPreference<string>('playmat-id'));
   customPlaymatsDisabled.value = (await localRepository.getPreference<boolean>('disable-custom-playmats')) === true;
+  notificationsEnabled.value = (await localRepository.getPreference<boolean>('notifications-enabled')) !== false;
   languagePreference.value = normalizePreference(await localRepository.getPreference('language-preference'));
   languagePreference.value = initializeLocale(languagePreference.value, navigator.languages?.length ? navigator.languages : [navigator.language]);
   initialized.value = true;
@@ -279,7 +287,7 @@ function notifyMessage(message: string, error = true): void {
 function notifyError(error: unknown): void { notify(errorMessageKey(error), true); }
 function receiveRoom(next: RoomSnapshot): void {
   for (const event of notificationTracker.update(next)) {
-    showSystemNotification(t('app.name'), t(`notifications.${event.type}`, 'name' in event ? { name: event.name } : {}));
+    if (notificationsEnabled.value) showSystemNotification(t('app.name'), t(`notifications.${event.type}`, 'name' in event ? { name: event.name } : {}));
   }
   room.value = next;
   if (!next.state) { handReveals.value = []; handRevealPrompt.value = undefined; }
@@ -527,7 +535,7 @@ function publishHandPresence(presence: HandPresenceInput): void {
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </DeckWorkshop>
 
-  <GameTable v-else-if="page === 'table' && state" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :hand-reveals="handReveals" :hand-reveal-prompt="handRevealPrompt" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @hand-presence="publishHandPresence" @target="sendTarget" @request-hand-reveal="requestHandReveal" @respond-hand-reveal="respondHandReveal" @end-hand-reveal="endHandReveal" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
+  <GameTable v-else-if="page === 'table' && state" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :notifications-enabled="notificationsEnabled" :notification-permission="notificationPermission" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :hand-reveals="handReveals" :hand-reveal-prompt="handRevealPrompt" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @set-notifications-enabled="setNotificationsEnabled" @hand-presence="publishHandPresence" @target="sendTarget" @request-hand-reveal="requestHandReveal" @respond-hand-reveal="respondHandReveal" @end-hand-reveal="endHandReveal" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </GameTable>
 

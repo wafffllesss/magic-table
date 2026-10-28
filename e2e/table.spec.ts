@@ -163,7 +163,8 @@ test('supports drawing, selection, card inspection and help shortcuts', async ({
 test('groups library and general controls around the table on desktop and mobile', async ({ page }) => {
   await startLocalDemo(page);
   await expect(page.locator('.deck-actions')).toBeVisible();
-  await expect(page.locator('.deck-actions button')).toHaveCount(3);
+  await expect(page.locator('.deck-actions button')).toHaveCount(4);
+  await expect(page.locator('.deck-actions').getByRole('button', { name: 'Revelar do grimório' })).toBeVisible();
   await expect(page.locator('.general-actions')).toBeVisible();
   await expect(page.locator('.quick-actions')).toHaveCount(0);
   await expect(page.locator('.self-table-tools .commander-note')).toBeVisible();

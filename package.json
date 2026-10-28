@@ -3,7 +3,7 @@
   "productName": "Meu Magic",
   "private": true,
   "type": "module",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "author": "Meu Magic",
   "description": "Mesa virtual para partidas casuais de Magic: The Gathering.",
   "main": "electron/main.cjs",

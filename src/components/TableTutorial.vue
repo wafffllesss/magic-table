@@ -30,7 +30,7 @@ function keys(event: KeyboardEvent): void {
       <div class="tutorial-heading"><span class="eyebrow">{{ t('tutorial.title') }}</span><span class="tutorial-progress">{{ t('tutorial.step', { current: index + 1, total: steps.length }) }}</span></div>
       <div :key="steps[index]" class="tutorial-illustration" :class="`tutorial-${steps[index]}`" aria-hidden="true">
         <div class="tutorial-board"><div class="tutorial-board-line"></div><div class="tutorial-card tutorial-card-one"><span>✦</span></div><div class="tutorial-card tutorial-card-two"><span>✦</span></div></div>
-        <div v-if="steps[index] === 'menu'" class="tutorial-menu"><i></i><i></i><i></i></div>
+        <div v-if="steps[index] === 'menu'" class="tutorial-context-menu"><i></i><i></i><i></i></div>
         <div v-if="steps[index] === 'target'" class="tutorial-arrow">➜</div>
         <div v-if="steps[index] === 'keys'" class="tutorial-key-list"><kbd>CTRL</kbd><kbd>D</kbd><kbd>T</kbd><kbd>?</kbd></div>
         <div class="tutorial-pointer">↖</div>
