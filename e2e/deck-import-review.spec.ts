@@ -15,13 +15,13 @@ test('keeps the imported deck inspection open when the library updates', async (
   </script></body></html>` }));
   await page.goto('/import-review-harness');
   await page.getByRole('tab', { name: /import/i }).click();
-  await page.getByRole('button', { name: /check list only/i }).click();
-  await expect(page.getByRole('button', { name: /back to list/i })).toBeVisible();
+  await page.getByRole('button', { name: /só conferir a lista/i }).click();
+  await expect(page.getByRole('button', { name: /voltar à lista/i })).toBeVisible();
   await expect(page.getByText('Commander exige 100 cartas; o deck tem 36.')).toBeVisible();
   await page.evaluate(() => (window as any).updateDecks());
-  await expect(page.getByRole('button', { name: /back to list/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: /voltar à lista/i })).toBeVisible();
   await expect(page.locator('.deck-inspection-card')).toHaveCount(2);
-  await page.getByRole('button', { name: /back to list/i }).click();
+  await page.getByRole('button', { name: /voltar à lista/i }).click();
   await expect(page.locator('#deck-import')).toBeVisible();
 });
 
