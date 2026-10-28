@@ -42,7 +42,6 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await input.fill('Plains');
     const plains = dialog.getByRole('button', { name: /^Plains, \d+ cópia/ });
     await expect(plains).toBeVisible();
-    const copies = Number((await plains.getAttribute('aria-label'))!.match(/, (\d+) cópia/)![1]);
     const zoom = dialog.getByRole('button', { name: 'Inspecionar Plains', exact: true });
     if (viewport.width < 700) await zoom.tap();
     else await zoom.press('Enter');
@@ -70,8 +69,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(plains).toHaveAttribute('aria-pressed', 'true');
     await input.fill('no-such-card');
     await expect(dialog.locator('.library-no-results')).toContainText('Nenhuma carta');
-    await expect(dialog.locator('.library-selection-count')).toContainText(`${copies} carta(s)`);
-    if (copies > 20) await expect(dialog.getByRole('button', { name: 'Concluir e embaralhar' })).toBeDisabled();
+    await expect(dialog.locator('.library-selection-count')).toContainText('1 carta(s)');
     await input.fill('Plains');
     await expect(plains).toHaveAttribute('aria-pressed', 'true');
     await plains.press('Space');

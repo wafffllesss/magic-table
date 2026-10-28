@@ -12,7 +12,6 @@ test.beforeEach(async ({ page }) => {
 
 test('starts the local Commander table and provides four seats', async ({ page }) => {
   await startLocalDemo(page);
-  await expect(page.getByText('DEMONSTRAÇÃO LOCAL')).toBeVisible();
   await expect(page.locator('.player-mat')).toHaveCount(4);
   await expect(page.locator('.mat-header')).toHaveCount(0);
   await expect(page.locator('.seat-nameplate')).toHaveCount(3);

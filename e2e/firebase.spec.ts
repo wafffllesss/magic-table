@@ -156,16 +156,16 @@ test('synchronizes four players, protects hidden zones and restores the same pla
     await pages[0].keyboard.press('Escape');
     await expect(pages[0].locator('.shared-card-inspection')).toHaveCount(0);
     for (const page of pages.slice(1)) {
-      await expect(page.getByRole('img', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
+      await expect(page.getByRole('group', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
       await expect(page.locator('.fan-card')).toHaveCount(7);
     }
     await expect(pages[0].locator('.deck-action').first()).toBeEnabled();
     await pages[0].keyboard.press('Control+z');
     await expect(pages[0].locator('.fan-card')).toHaveCount(7);
-    for (const page of pages.slice(1)) await expect(page.getByRole('img', { name: 'Mão de Ana: 7 cartas', exact: true })).toBeAttached();
+    for (const page of pages.slice(1)) await expect(page.getByRole('group', { name: 'Mão de Ana: 7 cartas', exact: true })).toBeAttached();
     await pages[0].keyboard.press('Control+y');
     await expect(pages[0].locator('.fan-card')).toHaveCount(8);
-    for (const page of pages.slice(1)) await expect(page.getByRole('img', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
+    for (const page of pages.slice(1)) await expect(page.getByRole('group', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
     for (const page of pages) expect(await page.evaluate(async () => {
       const { peerRoom } = await import('/src/services/peerRoom.ts');
       const room = peerRoom as any;
@@ -189,7 +189,7 @@ test('synchronizes four players, protects hidden zones and restores the same pla
     await expect(pages[0].getByRole('region', { name: 'Vida de Ana', exact: true }).locator('strong')).toHaveText('41');
     const after = await request.get(`${databaseURL}/p2pRooms/${roomId}/members.json?ns=${namespace}`, { headers: { Authorization: 'Bearer owner' } });
     expect(Object.keys(await after.json()).sort()).toEqual(uid);
-    for (const page of pages.slice(1)) await expect(page.getByRole('img', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
+    for (const page of pages.slice(1)) await expect(page.getByRole('group', { name: 'Mão de Ana: 8 cartas', exact: true })).toBeAttached();
     for (const [index, page] of pages.entries()) await expect.poll(() => page.evaluate(async () => {
       const { peerRoom } = await import('/src/services/peerRoom.ts');
       return (peerRoom as any).snapshot.connectionState;

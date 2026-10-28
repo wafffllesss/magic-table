@@ -35,7 +35,7 @@ test('renders the exact public count, including disconnected opponents, without 
     await expect(hand.locator('.opponent-hand-count')).toHaveText(`${count} na mão`);
     await expect(hand).toHaveAttribute('aria-label', `Mão de northWest: ${count} ${count === 1 ? 'carta' : 'cartas'}`);
   }
-  await expect(hand).toHaveCSS('pointer-events', 'none');
+  await expect(hand).toHaveAttribute('aria-haspopup', 'menu');
   await expect(page.locator('.opponent-hand img, .opponent-hand button, .opponent-hand [data-card-id]')).toHaveCount(0);
   await expect(page.locator('.opponent-hand-card .card-tile-back')).toHaveCount(14);
 });

@@ -42,7 +42,7 @@ test('detects the device language, applies and persists an explicit choice, and 
   await expect(page.getByRole('heading', { name: 'Jogos', exact: true })).toBeVisible();
   await page.locator('.language-selector select').selectOption('en');
   await expect(page.getByRole('heading', { name: 'Games', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /Lia · Edit name/ })).toBeVisible();
+  await expect(page.locator('.profile-player strong').filter({ hasText: 'Lia' })).toBeVisible();
   await expect(page.locator('.room-browser-header .language-selector')).toHaveCount(1);
 
   await page.getByRole('button', { name: /Change deck/ }).click();
@@ -51,7 +51,7 @@ test('detects the device language, applies and persists an explicit choice, and 
   await expect(page.locator('.room-browser-header')).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
   const tableSelector = page.locator('.table-topbar .language-selector');
   await expect(tableSelector).toBeVisible();
   const headerBounds = await page.locator('.table-topbar').boundingBox();
