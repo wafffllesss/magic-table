@@ -28,7 +28,7 @@ export type GameAction =
   | { type: 'KEEP_HAND'; bottomCardIds?: string[] }
   | { type: 'PLAY_LAND'; cardId: string; x?: number; y?: number }
   | { type: 'REPOSITION_CARD'; cardId: string; x: number; y: number }
-  | { type: 'MOVE_CARD'; cardId: string; zone: Zone; x?: number; y?: number }
+  | { type: 'MOVE_CARD'; cardId: string; zone: Zone; x?: number; y?: number; libraryPosition?: 'top' | 'bottom' }
   | { type: 'TAP'; cardId: string }
   | { type: 'SET_LIFE'; amount: number; seatId?: string }
   | { type: 'CHANGE_COUNTER'; counter: string; amount: number; seatId?: string; cardId?: string }
@@ -213,7 +213,7 @@ function moveCard(state: MatchState, card: CardInstance, zone: Zone, actorId: st
   if (zone === 'command' && !getSeat(state, card.ownerId).commanderIds.includes(card.cardId)) throw new Error('Somente um comandante pode voltar para a zona de comando.');
   if (zone === 'command' && sourceZone !== 'battlefield' && card.ownerId !== actorId) throw new Error('Somente o proprietário pode mover esta carta para a zona de comando.');
   const cardName = card.card?.name ?? card.cardId;
-  if ((card.isToken || card.card?.type_line.includes('Token')) && ['hand', 'graveyard', 'exile'].includes(zone)) {
+  if ((card.isToken || card.card?.type_line.includes('Token')) && ['hand', 'library', 'graveyard', 'exile'].includes(zone)) {
     const owner = getSeat(state, card.ownerId);
     owner.hand = owner.hand.filter(id => id !== card.id);
     owner.library = owner.library.filter(id => id !== card.id);
@@ -244,21 +244,22 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
   const seat = getSeat(state, actorId);
   if (seat.status !== 'playing' || (current.suspendedSeatIds ?? []).includes(actorId)) throw new Error('Este participante não pode agir enquanto não estiver ativo.');
   let message = ''; let publicAction = true; let resolvedItemName: string | undefined;
-  const movedCardName = action.type === 'MOVE_CARD' ? state.cards[action.cardId]?.card?.name ?? state.cards[action.cardId]?.cardId : undefined;
+  const movedCardName = action.type === 'MOVE_CARD' ? (state.cards[action.cardId]?.zone === 'hand' && action.zone === 'library' ? 'uma carta' : state.cards[action.cardId]?.card?.name ?? state.cards[action.cardId]?.cardId) : undefined;
   const movedCardSourceZone = action.type === 'MOVE_CARD' ? state.cards[action.cardId]?.zone : undefined;
   switch (action.type) {
     case 'MULLIGAN': {
       if (state.phase !== 'mulligan' || seat.keptHand) throw new Error('Este jogador não pode mulligar agora.');
-      seat.library = shuffle([...seat.library, ...seat.hand], random); seat.hand = seat.library.splice(0, INITIAL_HAND_SIZE); seat.mulligans++;
+      seat.library = shuffle([...seat.library, ...seat.hand], random); seat.mulligans++;
+      seat.hand = seat.library.splice(0, Math.max(0, INITIAL_HAND_SIZE - Math.max(0, seat.mulligans - 1))); 
       seat.hand.forEach(id => { state.cards[id].zone = 'hand'; });
       seat.library.forEach(id => { state.cards[id].zone = 'library'; });
       message = `${seat.name} pediu mulligan (${seat.mulligans}).`; break;
     }
     case 'KEEP_HAND': {
       if (state.phase !== 'mulligan' || seat.keptHand) throw new Error('Esta mão já foi confirmada.');
-      const keepSize = INITIAL_HAND_SIZE - Math.max(0, seat.mulligans - 1);
+      const keepSize = Math.max(0, INITIAL_HAND_SIZE - Math.max(0, seat.mulligans - 1));
       const cardsToBottom = action.bottomCardIds ?? [];
-      if (cardsToBottom.length !== INITIAL_HAND_SIZE - keepSize || cardsToBottom.some(id => !seat.hand.includes(id))) throw new Error(`Escolha exatamente ${INITIAL_HAND_SIZE - keepSize} carta(s) para o fundo.`);
+      if (cardsToBottom.length !== Math.max(0, seat.hand.length - keepSize) || new Set(cardsToBottom).size !== cardsToBottom.length || cardsToBottom.some(id => !seat.hand.includes(id))) throw new Error(`Escolha exatamente ${Math.max(0, seat.hand.length - keepSize)} carta(s) para o fundo.`);
       seat.hand = seat.hand.filter(id => !cardsToBottom.includes(id)); seat.library.push(...cardsToBottom);
       cardsToBottom.forEach(id => { state.cards[id].zone = 'library'; });
       seat.keptHand = true;
@@ -283,9 +284,15 @@ export function applyAction(current: MatchState, actorId: string, action: GameAc
     case 'MOVE_CARD': {
       const card = getCard(state, action.cardId);
       const commanderToBattlefield = card.zone === 'command' && action.zone === 'battlefield';
+      if (action.libraryPosition !== undefined && (action.zone !== 'library' || !['top', 'bottom'].includes(action.libraryPosition))) throw new Error('Posição de biblioteca inválida.');
       moveCard(state, card, action.zone, actorId, action.x, action.y);
+      if (action.zone === 'library' && action.libraryPosition === 'top' && state.cards[card.id]) {
+        const owner = getSeat(state, card.ownerId);
+        owner.library = [card.id, ...owner.library.filter(id => id !== card.id)];
+      }
       if (commanderToBattlefield) seat.commanderCasts[card.cardId] = (seat.commanderCasts[card.cardId] ?? 0) + 1;
-      message = `${seat.name} moveu ${card.card?.name ?? 'uma carta'} para ${ZONE_LABELS[action.zone]}.`; break;
+      const destination = action.zone === 'library' && action.libraryPosition ? `${action.libraryPosition === 'top' ? 'o topo' : 'o fundo'} do deck` : ZONE_LABELS[action.zone];
+      message = `${seat.name} moveu ${movedCardName ?? 'uma carta'} para ${destination}.`; break;
     }
     case 'REPOSITION_CARD': {
       const card = getCard(state, action.cardId);
@@ -488,7 +495,7 @@ function gameLogEvent(action: GameAction, state: MatchState, actorId: string, mo
     case 'MULLIGAN': return { key: 'gameLog.mulligan', params: { actor, count: getSeat(state, actorId).mulligans } };
     case 'KEEP_HAND': return { key: 'gameLog.keep', params: { actor } };
     case 'PLAY_LAND': return { key: 'gameLog.playLand', params: { actor, card: cardName(action.cardId) } };
-    case 'MOVE_CARD': return { key: 'gameLog.move', params: { actor, card: movedCardName ?? cardName(action.cardId), zone: `table.zones.${action.zone}` } };
+    case 'MOVE_CARD': return { key: 'gameLog.move', params: { actor, card: movedCardName ?? cardName(action.cardId), zone: action.zone === 'library' && action.libraryPosition ? `table.revealDestination.${action.libraryPosition}` : `table.zones.${action.zone}` } };
     case 'TAP': return { key: 'gameLog.tap', params: { actor, verb: state.cards[action.cardId]?.tapped ? 'table.tapped' : 'table.untapped', card: cardName(action.cardId) } };
     case 'SET_LIFE': return { key: 'gameLog.life', params: { actor, player: getSeat(state, action.seatId ?? actorId).name, amount: action.amount > 0 ? `+${action.amount}` : action.amount } };
     case 'CHANGE_COUNTER': return { key: 'gameLog.counter', params: { actor, counter: action.counter, amount: action.amount > 0 ? `+${action.amount}` : action.amount, target: action.cardId ? cardName(action.cardId) : getSeat(state, action.seatId ?? actorId).name } };

@@ -190,15 +190,14 @@ export class PeerRoom extends EventTarget {
     await this.repository.saveDeck(deck);
     this.localDeck = deck;
     const commanders = deck.entries.filter(entry => entry.role === 'commander').map(entry => ({ cardId: entry.cardId, name: entry.name, role: 'commander' as const }));
-    await this.backend.saveProfile(deck.name, commanders, this.member?.playmatId);
+    await this.backend.saveProfile(deck.name, commanders);
     this.patchSnapshot({ seats: this.currentSeats() });
     this.maybeStartMatch();
   }
 
   async setPlaymat(id?: string): Promise<void> {
     if (!this.member?.seatId) throw new Error('Espectadores não podem alterar um lugar.');
-    const commanderSummary = this.member.deckSummary;
-    await this.backend.saveProfile(this.member.deckName ?? 'Deck Commander', commanderSummary, id);
+    await this.backend.setPlaymat(id);
   }
 
   async markReady(ready: boolean): Promise<void> {

@@ -27,6 +27,30 @@ function keepAllHands(state: MatchState): MatchState {
 }
 
 describe('Commander table domain', () => {
+  it.each(['top', 'bottom'] as const)('returns cards from different zones to the %s of their library', position => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.seats[0].id;
+    const ids = game.seats[0].hand.slice(0, 4);
+    for (const [index, zone] of (['hand', 'battlefield', 'graveyard', 'exile'] as const).entries()) {
+      if (zone !== 'hand') game = applyAction(game, actor, { type: 'MOVE_CARD', cardId: ids[index], zone });
+      const previous = [...game.seats[0].library];
+      game = applyAction(game, actor, { type: 'MOVE_CARD', cardId: ids[index], zone: 'library', libraryPosition: position });
+      expect(game.seats[0].library).toEqual(position === 'top' ? [ids[index], ...previous] : [...previous, ids[index]]);
+      expect(game.cards[ids[index]].zone).toBe('library');
+      expect(game.log.at(-1)?.event).toMatchObject({ key: 'gameLog.move', params: { zone: `table.revealDestination.${position}` } });
+      expect(game.log.at(-1)?.message).toContain(position === 'top' ? 'topo do deck' : 'fundo do deck');
+      if (zone === 'hand') expect(game.log.at(-1)?.message).not.toContain(game.cards[ids[index]].card!.name);
+    }
+  });
+  it('removes a spell from the stack when returning it to the library', () => {
+    let game = keepAllHands(newFourPlayerGame());
+    const actor = game.activeSeatId;
+    const id = game.seats.find(seat => seat.id === actor)!.hand[0];
+    game = applyAction(game, actor, { type: 'CAST', cardId: id });
+    game = applyAction(game, actor, { type: 'MOVE_CARD', cardId: id, zone: 'library', libraryPosition: 'top' });
+    expect(game.stack.some(item => item.sourceId === id)).toBe(false);
+    expect(game.seats.find(seat => seat.id === actor)!.library[0]).toBe(id);
+  });
   it('reveals the library top publicly and returns cards in the chosen order', () => {
     let game = keepAllHands(newFourPlayerGame());
     const actor = game.seats[0].id; const original = [...game.seats[0].library];
@@ -132,7 +156,7 @@ describe('Commander table domain', () => {
     expect(publicProjection(revealed).cards[instanceId]?.card?.name).toBe(card.card?.name);
   });
 
-  it('keeps the first multiplayer mulligan free and moves the next bottomed card into the library', () => {
+  it('keeps the first multiplayer mulligan free and draws one fewer card on each subsequent mulligan', () => {
     let game = newFourPlayerGame();
     const player = game.seats[0];
     game = applyAction(game, player.id, { type: 'MULLIGAN' }, 2100, () => 0);
@@ -141,13 +165,14 @@ describe('Commander table domain', () => {
     expect(game.seats[0].hand).toHaveLength(7);
     expect(game.seats[0].library).toHaveLength(92);
     game = applyAction(game, player.id, { type: 'MULLIGAN' }, 2200, () => 0);
-    const toBottom = game.seats[0].hand[0];
-    game = applyAction(game, player.id, { type: 'KEEP_HAND', bottomCardIds: [toBottom] }, 2300, () => 0);
+    expect(game.seats[0].hand).toHaveLength(6);
+    game = applyAction(game, player.id, { type: 'MULLIGAN' }, 2250, () => 0);
+    expect(game.seats[0].hand).toHaveLength(5);
+    game = applyAction(game, player.id, { type: 'KEEP_HAND', bottomCardIds: [] }, 2300, () => 0);
     expect(game.log.at(-1)?.event).toMatchObject({ key: 'gameLog.keep', params: { actor: player.name } });
     expect(game.seats[0].keptHand).toBe(true);
-    expect(game.seats[0].hand).toHaveLength(6);
-    expect(game.seats[0].library).toContain(toBottom);
-    expect(game.cards[toBottom].zone).toBe('library');
+    expect(game.seats[0].hand).toHaveLength(5);
+    expect(game.seats[0].library).toHaveLength(94);
   });
 
   it('taps and untaps a basic land without tracking mana', () => {
@@ -343,9 +368,9 @@ describe('Commander table domain', () => {
     const artifact = game.cards[support.id];
     const token = Object.values(game.cards).find(item => item.isToken)!;
     expect(first.x).toBe(second.x);
-    expect(second.y - first.y).toBeGreaterThanOrEqual(6);
-    expect(artifact.y).toBeLessThan(token.y);
-    expect(artifact.x).toBeGreaterThan(first.x);
+    expect(Math.abs(second.y - first.y)).toBeGreaterThanOrEqual(6);
+    expect(token.y).toBeLessThan(artifact.y);
+    expect(artifact.x).toBeLessThan(first.x);
   });
 
   it('positions resolved spells against the current field and respects explicit cast coordinates', () => {

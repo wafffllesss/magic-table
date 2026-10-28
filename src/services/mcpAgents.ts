@@ -25,7 +25,7 @@ const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('KEEP_HAND'), bottomCardIds: z.array(z.string()).max(7).optional() }),
   z.object({ type: z.literal('PLAY_LAND'), cardId: z.string(), x: point.optional(), y: point.optional() }),
   z.object({ type: z.literal('REPOSITION_CARD'), cardId: z.string(), x: point, y: point }),
-  z.object({ type: z.literal('MOVE_CARD'), cardId: z.string(), zone: z.enum(zones), x: point.optional(), y: point.optional() }),
+  z.object({ type: z.literal('MOVE_CARD'), cardId: z.string(), zone: z.enum(zones), x: point.optional(), y: point.optional(), libraryPosition: z.enum(['top', 'bottom']).optional() }),
   z.object({ type: z.literal('TAP'), cardId: z.string() }),
   z.object({ type: z.literal('SET_LIFE'), amount: z.number().int().min(-1000).max(1000), seatId: z.string().optional() }),
   z.object({ type: z.literal('CHANGE_COUNTER'), counter: z.string().min(1).max(24), amount: z.number().int().min(-1000).max(1000), seatId: z.string().optional(), cardId: z.string().optional() }),

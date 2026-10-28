@@ -19,6 +19,7 @@ import { useTableCameraLayer } from '../services/tableCameraLayer';
 import { cardInspection, closeCardInspection, inspectionDisabledKey, inspectionOpen, inspectionPending, openCardInspection } from '../services/cardInspection';
 import ManaText from './ManaText.vue';
 import PlaymatArt from './PlaymatArt.vue';
+import PlaymatPicker from './PlaymatPicker.vue';
 import { scheduleImageMeasurements } from '../services/imageVisibility';
 import TableContextMenu from './TableContextMenu.vue';
 import TableTutorial from './TableTutorial.vue';
@@ -28,23 +29,30 @@ import RevealedHand from './RevealedHand.vue';
 import ChatBubbles from './ChatBubbles.vue';
 import type { ChatMessage } from '../domain/chat';
 import type { HandRevealRequest, HandRevealView } from '../domain/handReveal';
-import { CARD_AREA, CARD_SIZE, FOV_LIMITS, MAT_HEIGHT, MAT_WIDTH, TABLE_SIZE, ZONE_GAP, ZONE_STEP, clampCameraPitch, clampCardPosition, createTableView, projectPoint, screenToCardPosition, screenToMat, screenToTable, SEAT_PLACEMENT, type SeatPosition, type ViewMode } from '../domain/tableView';
+import { CARD_AREA, CARD_SIZE, FOV_LIMITS, MAT_HEIGHT, MAT_WIDTH, TABLE_SIZE, ZONE_GAP, ZONE_STEP, clampCameraPitch, clampCardPosition, createTableView, projectPoint, screenToCardPosition, screenToMat, screenToTable, SEAT_PLACEMENT, shortestSeatRotation, type SeatPosition, type ViewMode } from '../domain/tableView';
 import { handPresenceStale } from '../domain/tablePresence';
 import { cardMenuOptions, indicatedSeat, type TableMenuOption } from '../domain/tableInteraction';
-import { PLAYMATS, validPlaymatId } from '../services/playmats';
+import { validPlaymatId, playmatColor } from '../services/playmats';
 import { cardTypeGroups, cardTypeKey, groupCreatureTokens } from '../domain/cardTypes';
 import type { CardDefinition } from '../domain/game';
 import { scryfall } from '../services/scryfall';
 import { formatGameLogEvent, useAppI18n } from '../i18n';
 
-const props = defineProps<{ state: MatchState; seatId?: TableSeatId; appVersion: string; updateAvailable?: boolean; playmatIds: Partial<Record<TableSeatId, string>>; customPlaymatsDisabled?: boolean; notificationsEnabled: boolean; notificationPermission: string; online: boolean; multiplayer?: boolean; roomCode?: string; spectator?: boolean; busy?: boolean; isHost?: boolean; onlineSeats?: Partial<Record<TableSeatId, { uid: string; online: boolean }>>; handPresence?: HandPresence[]; chatMessages?: ChatMessage[]; targetMarks?: TargetMark[]; handReveals?: HandRevealView[]; handRevealPrompt?: HandRevealRequest }>();
+const props = defineProps<{ state: MatchState; seatId?: TableSeatId; appVersion: string; updateAvailable?: boolean; playmatIds: Partial<Record<TableSeatId, string>>; customPlaymatsDisabled?: boolean; playmatColorsDisabled?: boolean; notificationsEnabled: boolean; notificationPermission: string; online: boolean; multiplayer?: boolean; solo?: boolean; roomCode?: string; spectator?: boolean; busy?: boolean; isHost?: boolean; onlineSeats?: Partial<Record<TableSeatId, { uid: string; online: boolean }>>; handPresence?: HandPresence[]; chatMessages?: ChatMessage[]; targetMarks?: TargetMark[]; handReveals?: HandRevealView[]; handRevealPrompt?: HandRevealRequest }>();
 const { t, locale } = useAppI18n();
-const emit = defineEmits<{ (event: 'open-update'): void; (event: 'actions', actions: GameAction[]): void; (event: 'set-playmat', id: string | undefined): void; (event: 'set-custom-playmats-disabled', disabled: boolean): void; (event: 'set-notifications-enabled', enabled: boolean): void; (event: 'leave'): void; (event: 'copy-room-code'): void; (event: 'hand-presence', presence: HandPresenceInput): void; (event: 'target', target: TargetIntent): void; (event: 'continue-without', seatId: string): void; (event: 'undo'): void; (event: 'redo'): void; (event: 'request-hand-reveal', seatId: TableSeatId): void; (event: 'respond-hand-reveal', requestId: string, accept: boolean): void; (event: 'end-hand-reveal'): void }>();
+const emit = defineEmits<{ (event: 'select-solo-seat', seatId: TableSeatId): void; (event: 'open-update'): void; (event: 'open-changelog'): void; (event: 'actions', actions: GameAction[]): void; (event: 'set-playmat', id: string | undefined): void; (event: 'set-custom-playmats-disabled', disabled: boolean): void; (event: 'set-playmat-colors-disabled', disabled: boolean): void; (event: 'set-notifications-enabled', enabled: boolean): void; (event: 'leave'): void; (event: 'copy-room-code'): void; (event: 'hand-presence', presence: HandPresenceInput): void; (event: 'target', target: TargetIntent): void; (event: 'continue-without', seatId: string): void; (event: 'undo'): void; (event: 'redo'): void; (event: 'request-hand-reveal', seatId: TableSeatId): void; (event: 'respond-hand-reveal', requestId: string, accept: boolean): void; (event: 'end-hand-reveal'): void }>();
 const seatOrder: TableSeatId[] = ['northWest', 'northEast', 'southEast', 'southWest'];
 const selfSeat = computed(() => props.state.seats.find(seat => seat.id === props.seatId));
 type RevealDestination = 'top' | 'bottom' | 'hand' | 'graveyard' | 'exile';
 const revealOrderPrompt = ref<{ destination: 'top' | 'bottom'; ids: string[]; close: boolean; choosing: boolean }>();
 const revealSinglePrompt = ref<string>();
+function returnCardToLibrary(destination: 'top' | 'bottom'): void {
+  const id = revealSinglePrompt.value;
+  revealSinglePrompt.value = undefined;
+  if (!id) return;
+  if (props.state.cards[id]?.zone === 'revealed') emitAction({ type: 'MOVE_LIBRARY_REVEALED', cardIds: [id], destination });
+  else emitAction({ type: 'MOVE_CARD', cardId: id, zone: 'library', libraryPosition: destination });
+}
 function revealedFor(seat: PlayerSeat): MatchState['cards'][string][] {
   return (seat.libraryRevealed ?? []).flatMap(id => props.state.cards[id] ? [props.state.cards[id]] : []);
 }
@@ -130,12 +138,43 @@ let zoomFrameAt = 0;
 const cameraLook = ref({ yaw: 0, pitch: 0, lean: 0 });
 const requestedLook = { yaw: 0, pitch: 0, lean: 0 };
 const reducedMotion = ref(false);
+const seatOrbit = ref<number>();
+let seatOrbitFrame = 0;
+function seatAngle(id: TableSeatId): number {
+  const seat = SEAT_PLACEMENT[id];
+  return Math.atan2(seat.y - TABLE_SIZE / 2, seat.x - TABLE_SIZE / 2);
+}
+function finishSeatOrbit(): void {
+  if (seatOrbitFrame) cancelAnimationFrame(seatOrbitFrame);
+  seatOrbitFrame = 0;
+  seatOrbit.value = undefined;
+}
+function animateSeatOrbit(from: TableSeatId | undefined, to: TableSeatId | undefined): void {
+  const start = seatOrbit.value ?? (from ? seatAngle(from) : undefined);
+  if (seatOrbitFrame) cancelAnimationFrame(seatOrbitFrame);
+  seatOrbitFrame = 0;
+  if (reducedMotion.value || start === undefined || !to) { seatOrbit.value = undefined; return; }
+  const end = seatAngle(to);
+  const distance = shortestSeatRotation(start, end);
+  if (Math.abs(distance) < 0.001) { seatOrbit.value = undefined; return; }
+  seatOrbit.value = start;
+  let started: number | undefined;
+  const tick = (now: number) => {
+    started ??= now;
+    const progress = Math.min(1, (now - started) / 550);
+    const eased = progress * progress * (3 - 2 * progress);
+    seatOrbit.value = start + distance * eased;
+    if (progress < 1) seatOrbitFrame = requestAnimationFrame(tick);
+    else finishSeatOrbit();
+  };
+  seatOrbitFrame = requestAnimationFrame(tick);
+}
 const resolvingFlight = ref<{ card: MatchState['cards'][string]; x: number; y: number; width: number; height: number; dx: number; dy: number; scaleX: number; scaleY: number }>();
 const arrivingCardId = ref('');
 let flightTimer: ReturnType<typeof setTimeout> | undefined;
 // Leave screen space for the controls and commander note beside the local mat.
 const controlSpace = computed(() => props.seatId && !props.spectator && cameraMode.value === 'seat' ? (stageSize.value.width <= 700 ? Math.min(400, stageSize.value.width) : 240) : 0);
-const cameraView = computed(() => createTableView(stageSize.value.width, stageSize.value.height, props.seatId, cameraMode.value, cameraLook.value.yaw, cameraLook.value.pitch, cameraFov.value, controlSpace.value, cameraLook.value.lean));
+const cameraView = computed(() => createTableView(stageSize.value.width, stageSize.value.height, props.seatId, cameraMode.value, cameraLook.value.yaw, cameraLook.value.pitch, cameraFov.value, controlSpace.value, cameraLook.value.lean, seatOrbit.value));
 watch(cameraView, scheduleImageMeasurements, { flush: 'post' });
 const geometryStyle = {
   '--table-size': `${TABLE_SIZE}px`, '--mat-width': `${MAT_WIDTH}px`, '--mat-height': `${MAT_HEIGHT}px`,
@@ -144,7 +183,6 @@ const geometryStyle = {
 };
 useTableCameraLayer(stageElement, sceneViewport, cameraScene, cameraView, cameraLook);
 const showPlaymats = ref(false);
-const playmatDraft = ref<string>();
 let cameraFrame = 0;
 let cameraFrameAt = 0;
 let resizeObserver: ResizeObserver | undefined;
@@ -244,7 +282,7 @@ function canDropOn(zone: Zone | 'command', seatId?: string): boolean {
     && Boolean(props.state.seats.find(seat => seat.id === card.ownerId)?.commanderIds.includes(card.cardId))
     && (drag.zone === 'battlefield' ? card.controllerId === props.seatId : ['hand', 'graveyard', 'exile'].includes(drag.zone));
   if (zone === 'stack') return ['hand', 'command'].includes(drag.zone) && props.state.phase === 'playing';
-  if (zone === 'library') return drag.zone === 'revealed' && seatId === card.ownerId;
+  if (zone === 'library') return drag.zone !== 'library' && seatId === card.ownerId && card.ownerId === props.seatId;
   if (zone === 'graveyard' || zone === 'exile' || zone === 'hand') return drag.zone !== zone && seatId === card.ownerId;
   return false;
 }
@@ -483,6 +521,7 @@ const handWindowActive = ref(true);
 const localCursorVisible = ref(true);
 let keyboardInput = false;
 const stageSpaceFocus = ref(false);
+const stageKeyboardFocus = ref(false);
 let revealTouchPointer: number | undefined;
 let revealTouchClickPointer: number | undefined;
 let revealTouchClickTimer: ReturnType<typeof setTimeout> | undefined;
@@ -493,7 +532,8 @@ const handInteractionOpen = computed(() => {
     || target?.kind === 'card' && ownHand.value.some(card => card.id === target.cardId);
 });
 const handDragCanReopen = ref(true);
-const ownHandExpanded = computed(() => handWindowActive.value && (dragCard.value?.moved
+const mulliganPending = computed(() => props.state.phase === 'mulligan' && !!selfSeat.value && !selfSeat.value.keptHand && !props.spectator);
+const ownHandExpanded = computed(() => mulliganPending.value || handWindowActive.value && (dragCard.value?.moved
   ? handPointerInside.value && handDragCanReopen.value
   : handPointerInside.value || handTouchOpen.value || handKeyboardFocus.value || handInteractionOpen.value));
 
@@ -548,6 +588,24 @@ const emptyTargets: TargetMark[] = [];
 const altTargetMode = ref(false);
 const targetSource = ref<(TargetReference & { kind: 'card' })>();
 const targetPreviewPoint = ref<{ x: number; y: number }>();
+const soloHandRevealSeats = ref(new Set<TableSeatId>());
+const displayedHandReveals = computed<HandRevealView[]>(() => [
+  ...(props.handReveals ?? []),
+  ...(props.solo ? [...soloHandRevealSeats.value].flatMap(ownerSeatId => {
+    const owner = props.state.seats.find(seat => seat.id === ownerSeatId);
+    if (!owner) return [];
+    return [{ ownerSeatId, ownerName: owner.name, requesterName: t('solo.local'), cards: owner.hand.flatMap(id => props.state.cards[id] ? [props.state.cards[id]] : []) }];
+  }) : []),
+]);
+function toggleSoloHandReveal(ownerSeatId: TableSeatId): void {
+  const next = new Set(soloHandRevealSeats.value);
+  if (next.has(ownerSeatId)) next.delete(ownerSeatId); else next.add(ownerSeatId);
+  soloHandRevealSeats.value = next;
+}
+function closeHandReveal(ownerSeatId: TableSeatId): void {
+  if (props.solo) toggleSoloHandReveal(ownerSeatId);
+  else emit('end-hand-reveal');
+}
 let targetPointer: { pointerId: number; source?: TargetReference; startX: number; startY: number; moved: boolean; mode: 'alt' | 'pending' } | undefined;
 let suppressTargetClick = false;
 let targetClickTimer: ReturnType<typeof setTimeout> | undefined;
@@ -557,7 +615,7 @@ const targetPreview = computed(() => {
   return origin && point && props.seatId ? { origin, ...point, seatId: props.seatId } : undefined;
 });
 const targetAnnouncement = ref('');
-const revealedHandIds = computed(() => new Set((props.handReveals ?? []).flatMap(reveal => reveal.cards.map(card => card.id))));
+const revealedHandIds = computed(() => new Set(displayedHandReveals.value.flatMap(reveal => reveal.cards.map(card => card.id))));
 function validTableTarget(value: unknown): value is TargetReference { return targetReferenceValid(value, props.state, revealedHandIds.value); }
 function targetName(reference: TargetReference): string {
   if (reference.kind === 'player') return t('table.lifeOf', { name: props.state.seats.find(seat => seat.id === reference.seatId)?.name ?? '' });
@@ -570,6 +628,9 @@ watch(() => props.targetMarks?.at(-1)?.id, id => {
   if (!mark) return;
   const author = props.state.seats.find(seat => seat.id === mark.seatId)?.name ?? '';
   targetAnnouncement.value = mark.kind === 'arrow' ? t('table.targetAnnounceArrow', { author, origin: targetName(mark.origin), target: targetName(mark.target) }) : t('table.targetAnnounceHighlight', { author, target: targetName(mark.target) });
+});
+watch(() => props.state.phase, phase => {
+  if (props.solo && phase === 'finished') soloHandRevealSeats.value = new Set();
 });
 function updateTargetCursor(): void {
   document.body.classList.toggle('has-target-mode', isMine.value && (altTargetMode.value || Boolean(targetSource.value)));
@@ -650,6 +711,7 @@ function handlePointerDown(event: PointerEvent): void {
   suppressTargetClick = false;
   flushPointer();
   keyboardInput = false;
+  stageKeyboardFocus.value = false;
   handKeyboardFocus.value = false;
   if (event.pointerType === 'touch') {
     const inside = pointerInOwnHand(event.clientX, event.clientY);
@@ -850,8 +912,7 @@ function matStyle(seatId: TableSeatId): Record<string, string> {
   const place = SEAT_PLACEMENT[seatId];
   return { left: `${place.x}px`, top: `${place.y}px`, transform: `translate(-50%,-50%) rotate(${place.angle}deg)` };
 }
-function openPlaymats(): void { playmatDraft.value = validPlaymatId(props.seatId ? props.playmatIds[props.seatId] : undefined); showPlaymats.value = true; }
-function applyPlaymat(): void { emit('set-playmat', playmatDraft.value); showPlaymats.value = false; }
+function openPlaymats(): void { showPlaymats.value = true; }
 function openSettings(): void { settingsTab.value = 'table'; showSettings.value = true; }
 function updateStageSize(): void {
   invalidateBounds();
@@ -977,7 +1038,7 @@ function pointerOnControl(event: PointerEvent): boolean {
 }
 function startDrag(event: PointerEvent, id: string): void {
   const card = props.state.cards[id];
-  if (!card || event.button !== 0 || !isMine.value || card.zone === 'library' || card.zone === 'stack') return;
+  if (!card || event.button !== 0 || !isMine.value || card.zone === 'library') return;
   const canMove = card.zone === 'battlefield' ? card.controllerId === props.seatId : card.ownerId === props.seatId;
   if (!canMove) return;
   updateOwnHand(event, 'follow');
@@ -1014,7 +1075,7 @@ function finishDrag(event: PointerEvent): void {
   const target = dropTargetAt(event.clientX, event.clientY);
   const destination = target?.zone;
   const targetSeatId = target?.seatId as SeatPosition | undefined;
-  if (moved && destination === 'library' && sourceZone === 'revealed') {
+  if (moved && destination === 'library') {
     revealSinglePrompt.value = id; suppressClickId.value = id;
   } else if (moved && destination === 'battlefield' && targetSeatId && targetSeatId === props.seatId) {
     const card = props.state.cards[id];
@@ -1181,7 +1242,10 @@ function clickCard(id: string): void { if (suppressClickId.value === id) return;
 function selectFieldCard(id: string, event?: MouseEvent): void { clickCard(id); if (event) handPointerClick(event); }
 function clickHandCard(id: string): void {
   if (suppressClickId.value === id) return;
-  if (props.state.phase === 'mulligan') toggleBottom(id); else select(id);
+  if (props.state.phase === 'mulligan') {
+    const required = Math.max(0, (selfSeat.value?.hand.length ?? 0) - Math.max(0, 7 - Math.max(0, (selfSeat.value?.mulligans ?? 0) - 1)));
+    if (required > 0) toggleBottom(id);
+  } else select(id);
 }
 function doubleClickCard(id: string): void {
   if (suppressClickId.value === id) return;
@@ -1214,9 +1278,13 @@ function menuTargetFor(element: Element): MenuTarget | undefined {
 const menuOptions = computed<TableMenuOption[]>(() => {
   const target = contextMenu.value?.target;
   if (!target) return [];
-  if (target.kind === 'hand') return isMine.value && props.online && !(props.handReveals ?? []).some(reveal => reveal.ownerSeatId === target.seatId)
-    ? [{ id: 'request-hand-reveal', label: t('table.requestHandReveal'), disabled: Boolean(props.busy) || props.state.phase === 'finished' }]
-    : [];
+  if (target.kind === 'hand') {
+    if (!isMine.value) return [];
+    if (props.solo) return [{ id: 'toggle-solo-hand-reveal', label: soloHandRevealSeats.value.has(target.seatId) ? t('table.hideSoloHand') : t('table.revealSoloHand'), disabled: Boolean(props.busy) || props.state.phase === 'finished' }];
+    return props.online && !displayedHandReveals.value.some(reveal => reveal.ownerSeatId === target.seatId)
+      ? [{ id: 'request-hand-reveal', label: t('table.requestHandReveal'), disabled: Boolean(props.busy) || props.state.phase === 'finished' }]
+      : [];
+  }
   if (target.kind === 'player') return isMine.value ? [{ id: 'target-select', label: t('table.targetSelect') }] : [];
   if (target.kind === 'card') return [...cardMenuOptions(props.state, target.cardId, props.seatId, props.spectator, props.busy).map(option => {
     const card = props.state.cards[target.cardId];
@@ -1270,6 +1338,7 @@ async function chooseMenu(id: string): Promise<void> {
   }
   if (id === 'target-select' && menuTarget?.kind === 'player') publishTarget({ kind: 'player', seatId: menuTarget.seatId });
   if (id === 'request-hand-reveal' && menuTarget?.kind === 'hand') emit('request-hand-reveal', menuTarget.seatId);
+  if (id === 'toggle-solo-hand-reveal' && menuTarget?.kind === 'hand' && props.solo) toggleSoloHandReveal(menuTarget.seatId);
   if (id === 'target-select' && cardId) publishTarget({ kind: 'card', cardId });
   if (id === 'target-from' && cardId) { targetSource.value = { kind: 'card', cardId }; targetPreviewPoint.value = menuPoint; }
   if (id === 'inspect' && cardId) inspectCard(cardId);
@@ -1365,8 +1434,8 @@ function captureClick(event: MouseEvent): void {
   if (suppressTouchClick) { event.preventDefault(); event.stopPropagation(); suppressTouchClick = false; }
 }
 function toggleLibraryChoice(ids: string[]): void {
-  const allSelected = ids.every(id => searchSelection.value.includes(id));
-  searchSelection.value = allSelected ? searchSelection.value.filter(id => !ids.includes(id)) : [...new Set([...searchSelection.value, ...ids])];
+  const selectedId = ids.find(id => searchSelection.value.includes(id));
+  searchSelection.value = selectedId ? searchSelection.value.filter(id => id !== selectedId) : [...searchSelection.value, ids[0]];
 }
 function finishSearch(): void {
   if (!searchSelection.value.length || searchSelection.value.length > 20 || props.state.paused || props.busy) return;
@@ -1434,7 +1503,7 @@ function onLogDialogKeys(event: KeyboardEvent): void {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
-function onMotionChange(event: MediaQueryListEvent): void { reducedMotion.value = event.matches; if (event.matches) { setZoomImmediately(requestedFov); freezeCamera(); setLook(0, 0, 0); } }
+function onMotionChange(event: MediaQueryListEvent): void { reducedMotion.value = event.matches; if (event.matches) { finishSeatOrbit(); setZoomImmediately(requestedFov); freezeCamera(); setLook(0, 0, 0); } }
 onMounted(() => {
   void loadTutorialPreference();
   window.addEventListener('click', clearSelectionOutsideCards, true);
@@ -1461,6 +1530,7 @@ onMounted(() => {
   handClockTimer = setInterval(() => { handNow.value = Date.now(); }, 1000);
 });
 onBeforeUnmount(() => {
+  finishSeatOrbit();
   tutorialRequest++;
   clearTimeout(clearSelectionTimer);
   window.removeEventListener('click', clearSelectionOutsideCards, true);
@@ -1492,7 +1562,7 @@ onBeforeUnmount(() => {
 });
 watch(() => [targetSource.value && props.state.cards[targetSource.value.cardId]?.zone, props.handReveals?.map(reveal => reveal.cards.map(card => card.id).join(',')).join('|')], () => { if (targetSource.value && !validTableTarget(targetSource.value)) cancelTarget(); });
 watch(() => props.state.id, () => { void loadTutorialPreference(); blurTargets(); selectedCardId.value = ''; selectedBottom.value = []; clearPendingDraw(); closeMenu(); openPublicZone.value = undefined; closeInspection(); restOwnHand(); });
-watch(() => props.seatId, () => { focusOwnSeat(); restOwnHand(); });
+watch(() => props.seatId, (next, previous) => { if (props.solo) animateSeatOrbit(previous, next); else finishSeatOrbit(); focusOwnSeat(); restOwnHand(); if (props.solo) { showPlaymats.value = false; selectedCardId.value = ''; selectedBottom.value = []; discardPointer(); blurTargets(); clearPendingDraw(); closeMenu(); closeInspection(); openPublicZone.value = undefined; publicZoneSearch.value = undefined; searchOpen.value = false; tokenLibraryOpen.value = false; transferPrompt.value = undefined; revealOrderPrompt.value = undefined; revealSinglePrompt.value = undefined; } });
 watch([() => props.state.id, () => props.seatId], resetHandExpansion);
 watch(() => ownHand.value.map(card => card.id).join(','), async () => {
   const pending = pendingDraw.value;
@@ -1537,28 +1607,29 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
     <header class="table-topbar">
       <div class="table-brand"><img class="brand-logo" :src="meuMagicLogo" alt="" aria-hidden="true"/><span>{{ t('app.name') }}</span></div>
       <button v-if="multiplayer && roomCode" class="room-code-badge table-room-code" @click="emit('copy-room-code')"><span>{{ t('lobby.inviteCode') }}</span><strong>{{ roomCode }}</strong><small>{{ t('lobby.copyCode') }}</small></button>
-      <div class="match-meta"><span class="connection-mark" :class="online ? 'is-live' : ''"></span><span>{{ online ? t('table.liveRoom') : t('table.localDemo') }}</span><i></i><span>COMMANDER</span><i></i><span>{{ t('table.round', { count: state.turn }) }}</span></div>
+      <label v-if="solo" class="solo-selector"><span>{{ t('solo.controlling') }}</span><select :aria-label="t('solo.controlling')" :value="seatId" :disabled="busy" @change="emit('select-solo-seat', ($event.target as HTMLSelectElement).value as TableSeatId)"><option v-for="seat in state.seats" :key="seat.id" :value="seat.id" :disabled="seat.status !== 'playing'">{{ seat.name }} · {{ t('solo.seat', { number: seatOrder.indexOf(seat.id as TableSeatId) + 1 }) }}</option></select></label>
       <div class="topbar-actions"><button class="icon-button" :title="t('table.overview')" @click="focusTable">⌖</button><button class="icon-button" :title="t('table.ownSeat')" @click="focusOwnSeat">◎</button><button class="icon-button settings-top" :aria-label="t('table.settings')" :title="t('table.settings')" @click="openSettings">⚙</button><button v-if="isMine" class="playmat-top-button" @click="openPlaymats">{{ t('table.personalizePlaymat') }}</button><button class="icon-button help-top" :title="t('table.shortcuts')" @click="showHelp = true">?</button><button class="leave-button" @click="emit('leave')">{{ t('table.leave') }} <span>↗</span></button><slot name="header-actions" /></div>
     </header>
     <div v-if="state.paused || disconnectedPlayers.length" class="table-pause-banner"><span>Ⅱ</span><div><strong>{{ t('table.paused') }}</strong><small>{{ state.paused ? t('table.pausedDescription', { name: disconnectedPlayers.find(player => !player.suspended)?.name ?? '' }) : disconnectedPlayers.map(player => `${player.name} · ${t('table.suspended')}`).join(' · ') }}</small><button v-for="player in disconnectedPlayers.filter(player => !player.suspended)" v-show="isHost && state.phase === 'playing'" :key="player.id" class="button button-ghost" :disabled="busy" @click.stop="emit('continue-without', player.id)">{{ t('table.continueWithout', { name: player.name }) }}</button></div><span>{{ t('table.synced') }}</span></div>
 
     <div class="game-layout">
-      <section ref="stageElement" class="table-stage" :class="{ 'space-focus': stageSpaceFocus }" tabindex="0" :aria-label="t('table.gameTable')" @blur="stageSpaceFocus = false" @wheel.prevent="zoom" @pointerdown="startPan" @pointerup="endPointer" @pointercancel="endPointer" @pointerleave="leaveStage">
+      <section ref="stageElement" class="table-stage" :class="{ 'space-focus': stageSpaceFocus, 'keyboard-focus': stageKeyboardFocus }" tabindex="0" :aria-label="t('table.gameTable')" @focus="stageKeyboardFocus = keyboardInput" @blur="stageSpaceFocus = false; stageKeyboardFocus = false" @wheel.prevent="zoom" @pointerdown="startPan" @pointerup="endPointer" @pointercancel="endPointer" @pointerleave="leaveStage">
         <div ref="sceneViewport" class="scene-viewport">
         <div ref="cameraScene" class="camera-scene">
           <div class="felt-board">
             <div v-for="seatId in seatOrder" :key="seatId" class="seat-place" :style="matStyle(seatId)" :data-seat="seatId">
             <div v-if="seatId === (props.seatId ?? 'southEast')" class="table-app-version">
-              <span>{{ t('table.appVersion', { version: appVersion }) }}</span>
+              <button type="button" @pointerdown.stop @click.stop="emit('open-changelog')">{{ t('table.appVersion', { version: appVersion }) }}</button>
               <button v-if="updateAvailable" type="button" @pointerdown.stop @click.stop="emit('open-update')">{{ t('table.updateApp') }} ↗</button>
             </div>
-            <div v-if="seatId !== props.seatId" class="seat-nameplate" :class="{ 'is-empty': !seatAt(seatId) }" :aria-label="seatAt(seatId)?.name ?? t('table.emptySeat')">
+            <component :is="solo && seatAt(seatId)?.status === 'playing' ? 'button' : 'div'" v-if="seatId !== props.seatId" class="seat-nameplate" :class="{ 'is-empty': !seatAt(seatId), 'solo-seat-switch': solo && seatAt(seatId)?.status === 'playing' }" :type="solo && seatAt(seatId)?.status === 'playing' ? 'button' : undefined" :disabled="solo && seatAt(seatId)?.status === 'playing' ? busy : undefined" :aria-label="solo && seatAt(seatId)?.status === 'playing' ? t('solo.controlSeat', { name: seatAt(seatId)?.name, number: seatOrder.indexOf(seatId) + 1, life: seatAt(seatId)?.life }) : seatAt(seatId)?.name ?? t('table.emptySeat')" :title="solo && seatAt(seatId)?.status === 'playing' ? t('solo.controlSeatHint') : undefined" @click="solo && seatAt(seatId)?.status === 'playing' && !busy ? emit('select-solo-seat', seatId) : undefined">
               <span class="player-dot" :class="seatAt(seatId) && seatIsOnline(seatId) ? 'is-online' : 'is-offline'" role="img" :aria-label="seatAt(seatId) && seatIsOnline(seatId) ? t('table.online') : t('table.offline')"></span>
               <strong :title="seatAt(seatId)?.name ?? t('table.emptySeat')">{{ seatAt(seatId)?.name ?? t('table.emptySeat') }}</strong>
-            </div>
+            </component>
             <section v-if="seatAt(seatId)" class="seat-life-panel" :class="{ 'is-self': seatId === props.seatId }" :aria-label="t('table.lifeOf', { name: seatAt(seatId)?.name })">
               <button v-if="isMine && seatId === props.seatId" class="seat-life-adjust" :aria-label="t('table.decreaseLife', { name: seatAt(seatId)?.name })" :disabled="busy || state.paused || state.phase === 'finished'" @click.stop="emitAction({type:'SET_LIFE',amount:-1,seatId})">−</button>
-              <div class="seat-life-reading" tabindex="0" role="group" :aria-label="t('table.lifeOf', { name: seatAt(seatId)?.name })"><strong class="seat-life-value" aria-live="polite" aria-atomic="true">{{ seatAt(seatId)?.life }}</strong><span>{{ seatAt(seatId)?.name }} <i>·</i> {{ t('table.life') }}</span><small v-if="seatAt(seatId)?.poison" class="seat-poison">☠ {{ seatAt(seatId)?.poison }} {{ t('table.poison') }}</small></div>
+              <button v-if="solo && seatId !== props.seatId && seatAt(seatId)?.status === 'playing'" type="button" class="seat-life-reading solo-seat-switch" :disabled="busy" :aria-label="t('solo.controlSeat', { name: seatAt(seatId)?.name, number: seatOrder.indexOf(seatId) + 1, life: seatAt(seatId)?.life })" :title="t('solo.controlSeatHint')" @click.stop="emit('select-solo-seat', seatId)"><strong class="seat-life-value" aria-live="polite" aria-atomic="true">{{ seatAt(seatId)?.life }}</strong><small v-if="seatAt(seatId)?.poison" class="seat-poison">☠ {{ seatAt(seatId)?.poison }} {{ t('table.poison') }}</small></button>
+              <div v-else class="seat-life-reading" tabindex="0" role="group" :aria-label="t('table.lifeOf', { name: seatAt(seatId)?.name })"><strong class="seat-life-value" aria-live="polite" aria-atomic="true">{{ seatAt(seatId)?.life }}</strong><small v-if="seatAt(seatId)?.poison" class="seat-poison">☠ {{ seatAt(seatId)?.poison }} {{ t('table.poison') }}</small></div>
               <button v-if="isMine && seatId === props.seatId" class="seat-life-adjust" :aria-label="t('table.increaseLife', { name: seatAt(seatId)?.name })" :disabled="busy || state.paused || state.phase === 'finished'" @click.stop="emitAction({type:'SET_LIFE',amount:1,seatId})">+</button>
             </section>
             <nav v-if="seatId === props.seatId && isMine && seatAt(seatId)" class="phase-navigation" :aria-label="t('table.phaseNavigation')">
@@ -1570,7 +1641,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
               <ol><li v-for="(step, index) in phaseSteps" :key="step" :class="{ 'is-current': index === timelineStepIndex, 'is-complete': timelineStepIndex > index }"><button class="timeline-step-button" type="button" :aria-current="index === timelineStepIndex ? 'step' : undefined" :disabled="!ownTurnActive || busy || state.paused || state.phase === 'finished'" :title="t(`table.steps.${step}`)" @click.stop="selectTimelineStep(step)"><span class="timeline-node">{{ String(index + 1).padStart(2, '0') }}</span><b>{{ t(`table.steps.${step}`) }}</b></button></li></ol>
             </section>
             <section class="player-mat" :class="[`mat-${seatId}`, seatId === props.seatId ? 'is-self' : '', { 'is-drop-ready': dropReady('battlefield', seatId), 'is-drop-hovered': dropHovered('battlefield', seatId) }]" data-drop-zone="battlefield" :data-seat="seatId">
-              <PlaymatArt v-if="!customPlaymatsDisabled && validPlaymatId(playmatIds[seatId])" class="playmat-art" :id="playmatIds[seatId]" />
+              <PlaymatArt v-if="validPlaymatId(playmatIds[seatId]) && (playmatColor(playmatIds[seatId]) ? !playmatColorsDisabled : !customPlaymatsDisabled)" class="playmat-art" :id="playmatIds[seatId]" />
               <template v-if="seatAt(seatId)">
                 <TableField :cards="cardsFor(seatAt(seatId)!, 'battlefield')" :seat-id="seatId" :selected-id="selectedCardId" :arriving-id="arrivingCardId" :drag-id="dragCard?.id" :drag-moved="dragCard?.moved" :reduced-motion="reducedMotion" :can-adjust-counters="!busy && !state.paused && state.phase !== 'finished' && selfSeat?.status === 'playing'" :spectator="spectator" @drag="startDrag" @select="selectFieldCard" @activate="doubleClickCard" @tap="tapCard" @counter="adjustCardCounter" />
                 <section v-if="seatAt(seatId)!.libraryRevealOpen" class="library-reveal-mat" data-drop-zone="revealed" :data-seat="seatId" :aria-label="t('table.libraryRevealTitle', { name: seatAt(seatId)!.name })" @pointerdown.stop>
@@ -1586,7 +1657,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
             </section>
             <template v-if="seatAt(seatId)">
               <OpponentHand v-if="spectator || seatId !== props.seatId" :count="hiddenCount(seatAt(seatId)!, 'hand')" :player-name="seatAt(seatId)!.name" :seat-id="seatId" />
-              <RevealedHand v-if="handReveals?.find(reveal => reveal.ownerSeatId === seatId)" v-bind="handReveals.find(reveal => reveal.ownerSeatId === seatId)!" :can-close="seatId === props.seatId && isMine" @close="emit('end-hand-reveal')" />
+              <RevealedHand v-if="displayedHandReveals.find(reveal => reveal.ownerSeatId === seatId)" v-bind="displayedHandReveals.find(reveal => reveal.ownerSeatId === seatId)!" :can-close="solo || seatId === props.seatId && isMine" @close="closeHandReveal(seatId)" />
               <div class="seat-zones-left">
                 <div class="library-zone-group">
                   <div v-if="seatId === props.seatId && isMine" class="deck-actions" :aria-label="t('table.libraryActions')">
@@ -1595,7 +1666,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                     <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing' || selfSeat?.libraryRevealOpen" :title="t('table.revealLibrary')" :aria-label="t('table.revealLibrary')" @click.stop="emitAction({ type: 'OPEN_LIBRARY_REVEAL' })"><span>◉</span><small>{{ t('table.reveal') }}</small></button>
                     <button class="deck-action" :disabled="busy || state.paused || state.phase === 'finished' || selfSeat?.status !== 'playing'" :title="t('table.shuffleLibrary')" :aria-label="t('table.shuffleLibrary')" @click.stop="emitAction({type:'SHUFFLE'})"><span>⤨</span><small>{{ t('table.shuffle') }}</small></button>
                   </div>
-                  <button class="physical-zone library-pile" data-drop-zone="library" :data-seat="seatId" :class="{ 'is-stacked': hiddenCount(seatAt(seatId)!, 'library') > 0 }" :data-menu-deck="seatId" :aria-label="t('table.libraryOf', { name: seatAt(seatId)?.name, count: hiddenCount(seatAt(seatId)!, 'library') }, hiddenCount(seatAt(seatId)!, 'library'))" @click.stop="seatId === props.seatId && isMine ? draw() : undefined">
+                  <button class="physical-zone library-pile" data-drop-zone="library" :data-seat="seatId" :class="{ 'is-stacked': hiddenCount(seatAt(seatId)!, 'library') > 0, 'is-drop-ready': dropReady('library', seatId), 'is-drop-hovered': dropHovered('library', seatId) }" :data-menu-deck="seatId" :aria-label="t('table.libraryOf', { name: seatAt(seatId)?.name, count: hiddenCount(seatAt(seatId)!, 'library') }, hiddenCount(seatAt(seatId)!, 'library'))" @click.stop="seatId === props.seatId && isMine && !dragCard ? draw() : undefined">
                     <PhysicalCardStack v-if="hiddenCount(seatAt(seatId)!, 'library') > 0" :count="hiddenCount(seatAt(seatId)!, 'library')" :seed="`${seatId}:library`">
                       <template #caption><span class="zone-caption">{{ t('table.zones.library').toUpperCase() }} <b>{{ hiddenCount(seatAt(seatId)!, 'library') }}</b></span></template>
                     </PhysicalCardStack>
@@ -1646,7 +1717,6 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                     </div>
                   </div>
                 </section>
-                <div v-if="state.phase==='mulligan' && selfSeat && !selfSeat.keptHand" class="mulligan-controls table-mulligan-controls"><span>{{ t('table.mulligan', { count: selfSeat.mulligans, cards: 7 - Math.max(0,selfSeat.mulligans-1) }) }}</span><button class="button button-ghost" @click.stop="emitAction({type:'MULLIGAN'})">{{ t('table.mulliganAction') }}</button><button class="button button-primary" :disabled="selectedBottom.length !== Math.max(0, selfSeat.hand.length - (7-Math.max(0,selfSeat.mulligans-1)))" @click.stop="keepHand">{{ t('table.keepHand') }}</button></div>
               </div>
             </template>
             </div>
@@ -1656,7 +1726,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
                 <header class="hub-heading"><strong>{{ stack.length ? t('table.stack') : t('table.resolved') }}</strong><span v-if="stack.length" class="stack-count">{{ stack.length }}</span></header>
                 <span class="priority-player">{{ seatAt(prioritySeat)?.name }}<small v-if="!stack.length">{{ t('table.turnPlayer') }}</small></span>
                 <div class="stack-cards" :class="{ 'is-drop-ready': dropReady('stack'), 'is-drop-hovered': dropHovered('stack') }" data-drop-zone="stack">
-                  <button v-for="(item, index) in stack.slice(-3)" :key="item.id" class="stack-back" :style="{'--stack-shift':`${(index - (Math.min(stack.length,3)-1)/2)*56}px`,'--stack-angle':`${(index - (Math.min(stack.length,3)-1)/2)*12}deg`}" :data-menu-card="item.sourceId" :aria-label="item.name" @click.stop="inspectCard(item.sourceId, $event)"><CardTile :card="state.cards[item.sourceId]" :compact="true" /><i>{{ item.kind === 'ability' ? 'HABILIDADE' : 'MAGIA' }}</i></button>
+                  <button v-for="(item, index) in stack.slice(-3)" :key="item.id" class="stack-back" :style="{'--stack-shift':`${(index - (Math.min(stack.length,3)-1)/2)*56}px`,'--stack-angle':`${(index - (Math.min(stack.length,3)-1)/2)*12}deg`}" :data-menu-card="item.sourceId" :aria-label="item.name" @pointerdown.stop="item.kind !== 'ability' && startDrag($event, item.sourceId)" @click.stop="suppressClickId !== item.sourceId && inspectCard(item.sourceId, $event)"><CardTile :card="state.cards[item.sourceId]" :compact="true" /><i>{{ item.kind === 'ability' ? 'HABILIDADE' : 'MAGIA' }}</i></button>
                   <span v-if="!stack.length" class="stack-empty"><span>◇</span>{{ t('table.noPending') }}</span>
                 </div>
                 <button v-if="stackTop && isMine" class="resolve-button" :disabled="busy || state.paused || state.passes.includes(seatId ?? '')" @click.stop="passPriority">{{ state.passes.includes(seatId ?? '') ? t('table.youPassed') : t('table.passPriority') }} <kbd>SPACE</kbd></button>
@@ -1675,7 +1745,12 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
         <TableTargetLayer :stage="stageElement" :state="state" :marks="targetMarks ?? emptyTargets" :preview="targetPreview" />
         <div v-if="targetSource" class="target-prompt" role="status"><span>{{ t('table.targetChoose') }}</span><button type="button" @click.stop="cancelTarget">{{ t('common.cancel') }}</button></div>
         <Teleport to="body"><div v-if="resolvingFlight" class="resolving-card-flight" :style="{ left: `${resolvingFlight.x}px`, top: `${resolvingFlight.y}px`, width: `${resolvingFlight.width}px`, height: `${resolvingFlight.height}px`, '--flight-x': `${resolvingFlight.dx}px`, '--flight-y': `${resolvingFlight.dy}px`, '--flight-scale-x': resolvingFlight.scaleX, '--flight-scale-y': resolvingFlight.scaleY }" aria-hidden="true"><CardTile :card="resolvingFlight.card" :compact="true" :zoom-enabled="false" /></div></Teleport>
-        <div v-if="ownHand.length" ref="ownHandElement" class="own-hand-fan" :class="{ 'is-expanded': ownHandExpanded }" :style="{ '--hand-retreat': `${handRetreat}px`, '--hand-area-height': `${handAreaHeight}px`, '--hand-peek': `${handPeek}px` }" data-drop-zone="hand" :data-seat="props.seatId" :aria-label="t('table.hand', { count: ownHand.length })" @focusin="focusOwnHand" @focusout="blurOwnHand">
+        <div v-if="ownHand.length || mulliganPending" ref="ownHandElement" class="own-hand-fan" :class="{ 'is-expanded': ownHandExpanded }" :style="{ '--hand-retreat': `${handRetreat}px`, '--hand-area-height': `${handAreaHeight}px`, '--hand-peek': `${handPeek}px` }" data-drop-zone="hand" :data-seat="props.seatId" :aria-label="t('table.hand', { count: ownHand.length })" @focusin="focusOwnHand" @focusout="blurOwnHand">
+          <div v-if="mulliganPending && selfSeat" class="mulligan-controls floating-mulligan-controls" @pointerdown.stop @click.stop>
+            <span>{{ t('table.mulligan', { count: selfSeat.mulligans }) }}</span>
+            <button class="button button-ghost" :disabled="busy || state.paused" @click="selectedBottom = []; emitAction({type:'MULLIGAN'})">{{ t('table.mulliganAction') }}</button>
+            <button class="button button-primary" :disabled="busy || state.paused || selectedBottom.length !== Math.max(0, selfSeat.hand.length - (7 - Math.max(0, selfSeat.mulligans - 1)))" @click="keepHand">{{ t('table.keepHand') }}</button>
+          </div>
           <div class="own-hand-hit-area" aria-hidden="true"></div>
           <div ref="ownHandCardsElement" class="own-hand-cards" @transitionend="measureOwnHand">
           <button v-for="(card, index) in ownHand" :key="card.id" class="fan-card" data-drop-zone="hand" :data-seat="props.seatId" :data-menu-card="card.id" :class="{selected:selectedCardId===card.id, 'mulligan-bottom': state.phase === 'mulligan' && selectedBottom.includes(card.id), 'is-dragging-source': dragCard?.id === card.id && dragCard?.moved}" :style="{'--fan-width-scale': Math.max(.5, Math.min(1, Math.sqrt(7 / ownHand.length))), '--fan-offset': `${(index - (ownHand.length - 1) / 2) * Math.min(5.5, 40 / Math.max(1, ownHand.length - 1))}%`, '--fan-angle': `${(index - (ownHand.length - 1) / 2) * Math.min(3.2, 22 / Math.max(1, ownHand.length - 1))}deg`, '--fan-drop': `${Math.pow(Math.abs(index - (ownHand.length - 1) / 2) / Math.max(1, (ownHand.length - 1) / 2), 2) * 14}px`, 'z-index': index + 1}" :aria-label="card.card?.name ?? t('table.handCard')" @pointerdown.stop="startDrag($event, card.id)" @click.stop="clickHandCard(card.id)"><span v-if="card.card?.mana_cost" class="fan-card-mana"><ManaText :text="card.card.mana_cost" /></span><CardTile :card="card" /></button>
@@ -1709,10 +1784,10 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
 
     <TableContextMenu v-if="contextMenu" :x="contextMenu.x" :y="contextMenu.y" :options="menuOptions" :title="menuTitle" @choose="chooseMenu" @close="closeMenu" />
     <div v-if="handRevealPrompt" class="modal-scrim hand-reveal-scrim"><section class="table-settings-dialog" role="dialog" aria-modal="true" :aria-label="t('table.handRevealRequestTitle')"><span class="eyebrow">{{ t('table.handRevealRequestTitle') }}</span><h2>{{ t('table.handRevealRequestBody', { name: handRevealPrompt.requesterName }) }}</h2><footer class="hand-reveal-actions"><button class="button button-ghost" @click="emit('respond-hand-reveal', handRevealPrompt.id, false)">{{ t('common.cancel') }}</button><button class="button button-primary" @click="emit('respond-hand-reveal', handRevealPrompt.id, true)">{{ t('table.acceptReveal') }}</button></footer></section></div>
-    <div v-if="revealSinglePrompt" class="modal-scrim" @click.self="revealSinglePrompt = undefined"><section class="reveal-order-dialog" role="dialog" aria-modal="true" :aria-label="t('table.revealChooseDestination')"><h2>{{ t('table.revealChooseDestination') }}</h2><button v-for="destination in (['top', 'bottom'] as const)" :key="destination" @click="emitAction({ type: 'MOVE_LIBRARY_REVEALED', cardIds: [revealSinglePrompt!], destination }); revealSinglePrompt = undefined">{{ t(`table.revealDestination.${destination}`) }}</button><button @click="revealSinglePrompt = undefined">{{ t('common.cancel') }}</button></section></div>
+    <div v-if="revealSinglePrompt" class="modal-scrim" @click.self="revealSinglePrompt = undefined" @keydown.esc.stop="revealSinglePrompt = undefined"><section class="reveal-order-dialog" role="dialog" aria-modal="true" :aria-label="t('table.revealChooseDestination')"><h2>{{ t('table.revealChooseDestination') }}</h2><button v-for="destination in (['top', 'bottom'] as const)" :key="destination" @click="returnCardToLibrary(destination)">{{ t(`table.revealDestination.${destination}`) }}</button><button @click="revealSinglePrompt = undefined">{{ t('common.cancel') }}</button></section></div>
     <div v-if="revealOrderPrompt" class="modal-scrim" @click.self="revealOrderPrompt = undefined"><section class="reveal-order-dialog" role="dialog" aria-modal="true" :aria-label="t('table.revealOrderTitle')"><h2>{{ t('table.revealOrderTitle') }}</h2><p>{{ t('table.revealOrderDescription') }}</p><template v-if="!revealOrderPrompt.choosing"><button @click="confirmRevealOrder">{{ t('table.revealKeepOrder') }}</button><button @click="revealOrderPrompt.choosing = true">{{ t('table.revealChooseOrder') }}</button></template><template v-else><ol><li v-for="(id, index) in revealOrderPrompt.ids" :key="id"><span>{{ state.cards[id]?.card?.name ?? t('table.card') }}</span><button :disabled="index === 0" :aria-label="t('table.revealMoveEarlier')" @click="shiftRevealOrder(index, -1)">↑</button><button :disabled="index === revealOrderPrompt.ids.length - 1" :aria-label="t('table.revealMoveLater')" @click="shiftRevealOrder(index, 1)">↓</button></li></ol><button @click="confirmRevealOrder">{{ t('table.revealConfirmOrder') }}</button></template><button @click="revealOrderPrompt = undefined">{{ t('common.cancel') }}</button></section></div>
-    <div v-if="showSettings" class="modal-scrim table-settings-scrim" @click.self="showSettings=false" @keydown.esc="showSettings=false"><section class="table-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="table-settings-title"><button class="modal-close" :aria-label="t('common.close')" @click="showSettings=false">×</button><span class="eyebrow">{{ t('table.settings') }}</span><h2 id="table-settings-title">{{ t('table.settings') }}</h2><div class="settings-tabs" role="tablist" :aria-label="t('table.settingsSections')"><button id="settings-tab-table" role="tab" type="button" :aria-selected="settingsTab==='table'" aria-controls="settings-panel-table" @click="settingsTab='table'">{{ t('table.settingsTableTab') }}</button><button id="settings-tab-notifications" role="tab" type="button" :aria-selected="settingsTab==='notifications'" aria-controls="settings-panel-notifications" @click="settingsTab='notifications'">{{ t('notifications.settingsTab') }}</button></div><section v-if="settingsTab==='table'" id="settings-panel-table" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-table"><label class="settings-toggle"><span><strong>{{ t('table.disableCustomPlaymats') }}</strong><small>{{ t('table.disableCustomPlaymatsDescription') }}</small></span><input type="checkbox" :checked="customPlaymatsDisabled" @change="emit('set-custom-playmats-disabled', ($event.target as HTMLInputElement).checked)"></label></section><section v-else id="settings-panel-notifications" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-notifications"><label class="settings-toggle"><span><strong>{{ t('notifications.settingsTab') }}</strong><small>{{ t(notificationPermission === 'denied' ? 'notifications.denied' : notificationPermission === 'unsupported' ? 'notifications.unsupported' : 'notifications.description') }}</small></span><input type="checkbox" :checked="notificationsEnabled && notificationPermission === 'granted'" :disabled="notificationPermission === 'denied' || notificationPermission === 'unsupported'" @change="emit('set-notifications-enabled', ($event.target as HTMLInputElement).checked); if (notificationPermission !== 'granted') ($event.target as HTMLInputElement).checked = false"></label></section></section></div>
-    <div v-if="showPlaymats" class="modal-scrim" @click.self="showPlaymats=false"><section class="playmat-modal" role="dialog" :aria-label="t('table.playmatDialog')"><button class="modal-close" :aria-label="t('common.close')" @click="showPlaymats=false">×</button><span class="eyebrow">{{ t('table.playmatEyebrow') }}</span><h2>{{ t('table.choosePlaymat') }}</h2><div class="playmat-preview"><PlaymatArt v-if="playmatDraft" :id="playmatDraft" class="playmat-preview-art" /><span>{{ PLAYMATS.find(item=>item.id===playmatDraft)?.name ?? t('table.greenFelt') }}</span></div><div class="playmat-options"><button class="playmat-choice felt-choice" :class="{selected:!playmatDraft}" @click="playmatDraft=undefined"><span class="playmat-choice-art">✳</span><strong>{{ t('table.greenFelt') }}</strong></button><button v-for="playmat in PLAYMATS" :key="playmat.id" class="playmat-choice" :class="{selected:playmatDraft===playmat.id}" @click="playmatDraft=playmat.id"><img :src="playmat.thumbnail" alt=""><strong>{{ playmat.name }}</strong></button></div><footer><a :href="PLAYMATS[0].source" target="_blank" rel="noreferrer">{{ t('table.officialMagicArt') }} ↗</a><button class="button button-primary" :disabled="busy" @click="applyPlaymat">{{ t('table.applyPlaymat') }}</button></footer></section></div>
+    <div v-if="showSettings" class="modal-scrim table-settings-scrim" @click.self="showSettings=false" @keydown.esc="showSettings=false"><section class="table-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="table-settings-title"><button class="modal-close" :aria-label="t('common.close')" @click="showSettings=false">×</button><span class="eyebrow">{{ t('table.settings') }}</span><h2 id="table-settings-title">{{ t('table.settings') }}</h2><div class="settings-tabs" role="tablist" :aria-label="t('table.settingsSections')"><button id="settings-tab-table" role="tab" type="button" :aria-selected="settingsTab==='table'" aria-controls="settings-panel-table" @click="settingsTab='table'">{{ t('table.settingsTableTab') }}</button><button id="settings-tab-notifications" role="tab" type="button" :aria-selected="settingsTab==='notifications'" aria-controls="settings-panel-notifications" @click="settingsTab='notifications'">{{ t('notifications.settingsTab') }}</button></div><section v-if="settingsTab==='table'" id="settings-panel-table" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-table"><label class="settings-toggle"><span><strong>{{ t('table.disableCustomPlaymats') }}</strong><small>{{ t('table.disableCustomPlaymatsDescription') }}</small></span><input type="checkbox" :checked="customPlaymatsDisabled" @change="emit('set-custom-playmats-disabled', ($event.target as HTMLInputElement).checked)"></label><label class="settings-toggle"><span><strong>{{ t('table.disablePlaymatColors') }}</strong><small>{{ t('table.disablePlaymatColorsDescription') }}</small></span><input type="checkbox" :checked="playmatColorsDisabled" @change="emit('set-playmat-colors-disabled', ($event.target as HTMLInputElement).checked)"></label></section><section v-else id="settings-panel-notifications" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-notifications"><label class="settings-toggle"><span><strong>{{ t('notifications.settingsTab') }}</strong><small>{{ t(notificationPermission === 'denied' ? 'notifications.denied' : notificationPermission === 'unsupported' ? 'notifications.unsupported' : 'notifications.description') }}</small></span><input type="checkbox" :checked="notificationsEnabled && notificationPermission === 'granted'" :disabled="notificationPermission === 'denied' || notificationPermission === 'unsupported'" @change="emit('set-notifications-enabled', ($event.target as HTMLInputElement).checked); if (notificationPermission !== 'granted') ($event.target as HTMLInputElement).checked = false"></label></section></section></div>
+    <PlaymatPicker v-if="showPlaymats" :id="seatId ? playmatIds[seatId] : undefined" :busy="busy" :eyebrow="solo ? t('solo.playmatFor', { name: selfSeat?.name ?? '' }) : undefined" @close="showPlaymats=false" @apply="emit('set-playmat', $event)" />
     <div v-if="searchOpen" class="modal-scrim library-search-scrim" @click.self="searchOpen = false" @keydown.stop="onSearchKeys">
       <section ref="searchDialog" class="library-search-modal" role="dialog" aria-modal="true" aria-labelledby="library-search-title" aria-describedby="library-search-description">
         <header class="library-search-heading">
@@ -1727,7 +1802,7 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
             <header class="library-type-heading"><h3>{{ column.label }}</h3><span>{{ column.copies }}</span></header>
             <div class="library-type-cards">
               <div v-for="(group, index) in column.choices" :key="group.cardId" class="library-search-entry" :style="{ '--card-order': index + 1 }">
-                <button class="library-search-result" :class="{ selected: group.ids.every(id => searchSelection.includes(id)) }" type="button" :aria-pressed="group.ids.every(id => searchSelection.includes(id))" :aria-label="`${group.name}, ${group.ids.length} ${group.ids.length === 1 ? 'cópia' : 'cópias'}`" @click="toggleLibraryChoice(group.ids)">
+                <button class="library-search-result" :class="{ selected: group.ids.some(id => searchSelection.includes(id)) }" type="button" :aria-pressed="group.ids.some(id => searchSelection.includes(id))" :aria-label="`${group.name}, ${group.ids.length} ${group.ids.length === 1 ? 'cópia' : 'cópias'}`" @click="toggleLibraryChoice(group.ids)">
                   <CardTile :definition="group.definition" :quantity="group.ids.length" />
                 </button>
                 <button class="library-choice-zoom" type="button" :aria-label="t('deck.inspectCard', { card: group.name })" :title="t('deck.inspectCard', { card: group.name })" @click="inspectLibraryChoice(group.definition, group.ids.length, $event)"><span aria-hidden="true">⌕</span></button>
@@ -1811,3 +1886,9 @@ watch([showPlaymats, showHelp, showTutorial, searchOpen, tokenLibraryOpen, inspe
     <div v-if="showHelp" class="modal-scrim" @click.self="showHelp=false"><section class="help-modal"><button class="modal-close" :aria-label="t('common.close')" @click="showHelp=false">×</button><span class="eyebrow">{{ t('table.commanderControls') }}</span><h2>{{ t('table.playYourWay') }}</h2><p>{{ t('table.helpIntro') }}</p><div class="shortcut-list"><div><kbd>ENTER</kbd><span>{{ t('chat.shortcut') }}</span></div><div><kbd>CTRL</kbd><kbd>D</kbd><span>{{ t('table.drawOne') }}</span></div><div><kbd>CTRL</kbd><kbd>Z</kbd><span>{{ t('table.undoAction') }}</span></div><div><kbd>CTRL</kbd><kbd>Y</kbd><span>{{ t('table.redoAction') }} (Ctrl + Shift + Z)</span></div><div><kbd>T</kbd><span>{{ t('table.tapSelected') }}</span></div><div><kbd>{{ t('table.middleMouse') }}</kbd><span>{{ t('table.tapMouse') }}</span></div><div><kbd>{{ t('table.doubleClick') }}</kbd><span>{{ t('table.tapMouse') }}</span></div><div><kbd>F</kbd><span>{{ t('table.flipSelected') }}</span></div><div><kbd>ALT</kbd><span>{{ t('table.targetShortcut') }}</span></div><div><kbd>LEFT MOUSE</kbd><span>{{ t('table.selectMove') }}</span></div><div><kbd>MOUSE</kbd><span>{{ t('table.lookAround') }}</span></div><div><kbd>SCROLL</kbd><span>{{ t('table.scrollHelp') }}</span></div><div><kbd>{{ t('table.rightMouse') }}</kbd><span>{{ t('table.contextHelp') }}</span></div><div><kbd>TOUCH</kbd><span>{{ t('table.touchPan') }}</span></div><div><kbd>ESC</kbd><span>{{ t('table.cancelSelection') }}</span></div></div><button class="button button-ghost tutorial-reopen" @click="openTutorial">{{ t('tutorial.reopen') }}</button><button class="button button-primary" @click="showHelp=false">{{ t('table.understood') }} <kbd>↵</kbd></button></section></div>
   </main>
 </template>
+
+<style scoped>
+.solo-selector { display:flex; align-items:center; gap:6px; min-width:0; color:#b8e677; font-size:10px; } .solo-selector select { max-width:180px; min-width:0; padding:5px; color:#e8ece7; background:#18221e; border:1px solid #b8e67755; border-radius:5px; } @media(max-width:700px) { .solo-selector span { display:none; } .solo-selector select { max-width:100px; font-size:10px; } }
+.solo-seat-switch { cursor:pointer; color:inherit; } .solo-seat-switch:hover:not(:disabled), .solo-seat-switch:focus-visible { border-color:var(--lime); box-shadow:0 0 18px #b8e67740; }
+.seat-nameplate.solo-seat-switch { pointer-events:auto; border:1px solid transparent; border-radius:10px; background:transparent; color:#e2eedb; }
+</style>

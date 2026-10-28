@@ -9,14 +9,14 @@ import type { CardDefinition, DeckDefinition, DeckEntry } from '../domain/game';
 import { totalCards } from '../domain/game';
 import { importTextDeck } from '../services/starters';
 import { PRECONS } from '../services/precons';
-import { validateDeck } from '../domain/deck';
+import { DeckImportError, validateDeck } from '../domain/deck';
 import { localRepository } from '../services/storage';
 import meuMagicLogo from '../assets/meu-magic-logo.svg';
 import { scryfall } from '../services/scryfall';
 import { cardNames, normaliseCardName as normalise } from '../domain/cardNames';
 import { COMMANDER_COLORS, matchesCommanderColors } from '../domain/deckFilter';
 import { cardTypeGroups, cardTypeKey } from '../domain/cardTypes';
-import { errorMessageKey, localizeError, useAppI18n } from '../i18n';
+import { errorMessageKey, useAppI18n } from '../i18n';
 
 const props = withDefaults(defineProps<{
   decks: DeckDefinition[];
@@ -40,6 +40,8 @@ const tab = ref<'ready' | 'import' | 'create'>('ready');
 const activeDeckId = ref(props.selectedDeckId);
 const savedDecks = ref([...props.decks]);
 const importText = ref('Commander:\n1 Adeline, Resplendent Cathar\n\nDeck:\n35 Plains');
+const reviewedImport = ref<DeckDefinition>();
+watch(importText, () => { reviewedImport.value = undefined; importerProblems.value = []; successEvent.value = undefined; });
 const busy = ref(false);
 const refreshingCards = ref(false);
 const requestProgress = ref<{ label: string; loaded: number; total: number; estimated: boolean }>();
@@ -65,8 +67,9 @@ function endProgress(): void { requestProgress.value = undefined; }
 const knownCards = computed(() => new Map([...savedDecks.value.flatMap(deck => deck.entries.flatMap(entry => entry.card ? [[entry.cardId, entry.card] as const] : [])), ...newEntries.value.flatMap(entry => entry.card ? [[entry.cardId, entry.card] as const] : [])]));
 const activeDeck = computed(() => savedDecks.value.find(deck => deck.id === activeDeckId.value));
 const deckDetailOpen = ref(false);
+const inspectionDeck = computed(() => tab.value === 'import' ? reviewedImport.value : activeDeck.value);
 const selectionOverview = computed(() => props.selection && tab.value === 'ready' && !deckDetailOpen.value);
-const detailColumns = computed(() => activeDeck.value ? groupDeckEntries(activeDeck.value) : []);
+const detailColumns = computed(() => inspectionDeck.value ? groupDeckEntries(inspectionDeck.value) : []);
 const loadedPrecons = computed(() => savedDecks.value.filter(deck => PRECONS.some(item => item.id === deck.id)).length);
 const selectedColors = ref<string[]>([]);
 const visibleDecks = computed(() => savedDecks.value.filter(deck => matchesCommanderColors(deck, selectedColors.value)));
@@ -76,13 +79,13 @@ const saveBusy = ref(false);
 
 watch(() => props.decks, next => {
   savedDecks.value = [...next];
-  if (!next.some(deck => deck.id === activeDeckId.value)) { activeDeckId.value = next[0]?.id ?? ''; deckDetailOpen.value = false; }
+  if (!next.some(deck => deck.id === activeDeckId.value)) { activeDeckId.value = next[0]?.id ?? ''; if (tab.value !== 'import') deckDetailOpen.value = false; }
 }, { immediate: true });
 
 function openDeck(deck: DeckDefinition): void {
   activeDeckId.value = deck.id; deckDetailOpen.value = true; successEvent.value = undefined; importerProblems.value = [];
 }
-function returnToLibrary(): void { closeInspection(); deckDetailOpen.value = false; }
+function returnToLibrary(): void { closeInspection(); deckDetailOpen.value = false; reviewedImport.value = undefined; importerProblems.value = []; }
 function inspectEntry(entry: DeckEntry, event: MouseEvent): void {
   const opener = event.currentTarget as HTMLElement;
   const element = opener.querySelector<HTMLElement>('.card-tile');
@@ -163,7 +166,7 @@ async function importList(): Promise<void> {
     const parsed = importTextDeck(importText.value);
     const resolved = await resolveDeck(parsed);
     const checks = validateDeck(resolved, knownCardsFor(resolved));
-    if (checks.length) { importerProblems.value = checks; return; }
+    importerProblems.value = checks;
     resolved.name = parsed.name === 'Deck importado' ? 'Deck importado' : parsed.name;
     await localRepository.saveDeck(resolved); saveToList(resolved); activeDeckId.value = resolved.id; deckDetailOpen.value = true;
     emit('updated', resolved); tab.value = 'ready';
@@ -242,14 +245,16 @@ async function addRecommendedBasics(): Promise<void> {
 }
 
 async function resolveImport(): Promise<void> {
-  busy.value = true; importerProblems.value = [];
+  busy.value = true; importerProblems.value = []; successEvent.value = undefined;
+  const text = importText.value;
   beginProgress();
   try {
-    const resolved = await resolveDeck(importTextDeck(importText.value));
-    const checks = validateDeck(resolved, knownCardsFor(resolved));
-    if (checks.length) importerProblems.value = checks;
-    else { activeDeckId.value = resolved.id; successEvent.value = { key: 'deck.recognized', params: { count: totalCards(resolved) } }; }
-  } catch (error) { importerProblems.value = [friendly(error)]; }
+    const resolved = await resolveDeck(importTextDeck(text));
+    if (text !== importText.value) return;
+    reviewedImport.value = resolved;
+    importerProblems.value = validateDeck(resolved, knownCardsFor(resolved));
+    deckDetailOpen.value = true;
+  } catch (error) { if (text === importText.value) importerProblems.value = [friendly(error)]; }
   finally { busy.value = false; endProgress(); }
 }
 
@@ -326,11 +331,12 @@ function commanderNames(deck?: DeckDefinition): string { return deck?.commanders
 function friendly(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
   const prefix = 'Cartas não encontradas no Scryfall: ';
-  return message.startsWith(prefix) ? `missing-cards:${message.slice(prefix.length)}` : errorMessageKey(error);
+  return message.startsWith(prefix) ? `missing-cards:${message.slice(prefix.length)}` : error instanceof DeckImportError ? `deck-import:${message}` : errorMessageKey(error);
 }
 function problemText(problem: string): string {
   if (problem.startsWith('missing-cards:')) return t('deck.missingCards', { names: problem.slice('missing-cards:'.length) });
-  return problem.includes('.') ? t(problem) : localizeError(problem);
+  if (problem.startsWith('deck-import:')) return problem.slice('deck-import:'.length);
+  return /^[a-zA-Z][\w-]*\.[\w.-]+$/.test(problem) ? t(problem) : problem;
 }
 function clearSuccess(): void { successEvent.value = undefined; }
 </script>
@@ -346,7 +352,7 @@ function clearSuccess(): void { successEvent.value = undefined; }
       <button class="button button-small button-ghost workshop-back" type="button" :disabled="busy || props.busy" @click="emit('close')">{{ selection ? t('deck.cancel') : t('deck.backToTable') }} <span aria-hidden="true">↗</span></button>
     </header>
 
-    <div class="workshop-main" :class="{ 'is-deck-detail': deckDetailOpen && tab === 'ready' }">
+    <div class="workshop-main" :class="{ 'is-deck-detail': deckDetailOpen && inspectionDeck }">
       <aside class="collection-rail">
         <div class="eyebrow">{{ t('deck.library') }}</div>
         <div class="collection-heading"><h1>{{ t('deck.decks') }}</h1><span class="collection-count">{{ savedDecks.length.toString().padStart(2, '0') }}</span></div>
@@ -364,16 +370,16 @@ function clearSuccess(): void { successEvent.value = undefined; }
         <div class="collection-sidebar-foot"><span class="data-dot"></span><span>{{ t('deck.localData') }}</span></div>
       </aside>
 
-      <section class="workshop-editor" :class="{ 'deck-inspection-page': deckDetailOpen && tab === 'ready' }">
+      <section class="workshop-editor" :class="{ 'deck-inspection-page': deckDetailOpen && inspectionDeck }">
         <div v-if="notice" class="workshop-notice" role="status"><span>✳</span> {{ notice }}</div>
         <div v-if="success" class="workshop-success" role="status"><span>✓</span> {{ success }}</div>
         <div v-if="importerProblems.length" class="workshop-problems" role="alert">
           <span class="problem-symbol">!</span><div><strong>{{ t('deck.reviewBeforePlay') }}</strong><p v-for="problem in importerProblems.slice(0, 5)" :key="problem">{{ problemText(problem) }}</p></div>
         </div>
-        <div v-if="deckDetailOpen && tab === 'ready' && activeDeck">
+        <div v-if="deckDetailOpen && inspectionDeck">
           <div class="deck-inspection-heading">
-            <div><button class="button button-small button-ghost" type="button" @click="returnToLibrary">← {{ t('deck.backToLibrary') }}</button><div class="eyebrow">{{ activeDeck.precon ? `${t('deck.officialPrecon')} · ${activeDeck.precon.edition}` : t('deck.inspectDeck') }}</div><h2>{{ activeDeck.name }}</h2><p>{{ t('deck.cardCount', { count: totalCards(activeDeck) }) }} · {{ commanderNames(activeDeck) || t('deck.noCommander') }}</p></div>
-            <div class="deck-inspection-actions"><button class="button button-small button-ghost" type="button" @click="downloadActiveDeck">{{ t('deck.export') }}</button><button class="button button-small button-primary" type="button" :disabled="busy || props.busy" @click="continueWithDeck">{{ props.busy || busy ? t('deck.syncing') : t('deck.useDeck') }} <span aria-hidden="true">↗</span></button></div>
+            <div><button class="button button-small button-ghost" type="button" @click="returnToLibrary">← {{ t(tab === 'import' ? 'deck.backToImport' : 'deck.backToLibrary') }}</button><div class="eyebrow">{{ inspectionDeck.precon ? `${t('deck.officialPrecon')} · ${inspectionDeck.precon.edition}` : t('deck.inspectDeck') }}</div><h2>{{ inspectionDeck.name }}</h2><p>{{ t('deck.cardCount', { count: totalCards(inspectionDeck) }) }} · {{ commanderNames(inspectionDeck) || t('deck.noCommander') }}</p></div>
+            <div v-if="tab !== 'import'" class="deck-inspection-actions"><button class="button button-small button-ghost" type="button" @click="downloadActiveDeck">{{ t('deck.export') }}</button><button class="button button-small button-primary" type="button" :disabled="busy || props.busy" @click="continueWithDeck">{{ props.busy || busy ? t('deck.syncing') : t('deck.useDeck') }} <span aria-hidden="true">↗</span></button></div>
           </div>
           <div class="deck-columns-scroll" :aria-label="t('deck.cardsGrouped')">
             <section v-for="column in detailColumns" :key="column.key" class="deck-type-column" :aria-label="`${column.label}: ${t('deck.copies', { count: column.copies })}`">
@@ -386,7 +392,7 @@ function clearSuccess(): void { successEvent.value = undefined; }
               </div>
             </section>
           </div>
-          <div class="deck-inspection-tools"><button class="preview-remove" type="button" :disabled="busy || props.busy" @click="refreshActiveDeck"><span v-if="refreshingCards" class="scryfall-spinner" aria-hidden="true"></span>{{ refreshingCards ? t('deck.updating') : t('deck.refreshCards') }} <span v-if="!refreshingCards">↻</span></button><button v-if="!activeDeck.precon" class="preview-remove" type="button" :disabled="busy || props.busy" @click="deleteActiveDeck">{{ t('deck.removeSaved') }} <span>×</span></button><a v-if="activeDeck.precon" class="preview-source" :href="activeDeck.precon.sourceUrl" target="_blank" rel="noopener noreferrer">{{ t('deck.officialSource') }} ↗</a></div>
+          <div v-if="tab !== 'import'" class="deck-inspection-tools"><button class="preview-remove" type="button" :disabled="busy || props.busy" @click="refreshActiveDeck"><span v-if="refreshingCards" class="scryfall-spinner" aria-hidden="true"></span>{{ refreshingCards ? t('deck.updating') : t('deck.refreshCards') }} <span v-if="!refreshingCards">↻</span></button><button v-if="!inspectionDeck.precon" class="preview-remove" type="button" :disabled="busy || props.busy" @click="deleteActiveDeck">{{ t('deck.removeSaved') }} <span>×</span></button><a v-if="inspectionDeck.precon" class="preview-source" :href="inspectionDeck.precon.sourceUrl" target="_blank" rel="noopener noreferrer">{{ t('deck.officialSource') }} ↗</a></div>
         </div>
         <div v-else>
         <div class="workshop-toolbar">
@@ -416,10 +422,10 @@ function clearSuccess(): void { successEvent.value = undefined; }
             <button v-if="selectedColors.length" class="deck-color-filter-clear" type="button" @click="selectedColors = []">{{ t('deck.clearFilter') }}</button>
           </div>
           <div v-if="visibleDecks.length" class="starter-deck-grid">
-            <article v-for="(deck, index) in visibleDecks" :key="deck.id" class="starter-card" :class="[deckColor(deck), activeDeckId === deck.id ? 'is-active' : '']">
+            <article v-for="(deck, index) in visibleDecks" :key="deck.id" class="starter-card" :class="[deckColor(deck), activeDeckId === deck.id ? 'is-active' : '']" role="link" tabindex="0" :aria-label="t('deck.detailsNamed', { name: deck.name })" @click="openDeck(deck)" @keydown.enter.self.prevent="openDeck(deck)" @keydown.space.self.prevent="openDeck(deck)">
               <span class="starter-art" :class="`starter-art-${index + 1}`"><CommanderThumbnails :entries="deck.entries.filter(entry => entry.role === 'commander')" /><span class="art-stamp">{{ deck.commanders.length === 2 ? 'DUO' : deckColorLabel(deck) }}</span><span class="art-index">{{ String(index + 1).padStart(2, '0') }} <i>·</i> {{ String(deck.entries.length).padStart(2, '0') }}</span><span class="art-sig">M / T</span></span>
               <span class="starter-copy"><span class="starter-kicker">{{ deck.precon ? `${t('deck.officialPrecon')} · ${deck.precon.setCode}` : deck.commanders.length === 2 ? (deck.entries.some(entry => entry.role === 'commander' && entry.card?.type_line.includes('Background')) ? t('deck.chooseBackground') : t('deck.commanderPair')) : deckColorLabel(deck) + ' · ' + t('deck.leader') }}</span><strong>{{ deck.name }}</strong><span class="starter-commander">{{ deck.entries.filter(entry => entry.role === 'commander').map(entry => entry.name).join('  /  ') }}</span><span class="starter-meta"><span>{{ t('deck.cardCount', { count: totalCards(deck) }).toUpperCase() }}</span><span>{{ deck.precon?.edition ?? t('deck.personalList') }}</span></span></span>
-              <div class="selection-actions"><button class="button button-small button-primary" :disabled="busy || props.busy" :aria-label="t('deck.chooseNamed', { name: deck.name })" @click="choosePrepared(deck)">{{ t('deck.choose') }}</button><button class="button button-small button-ghost" :disabled="busy || props.busy" :aria-label="t('deck.detailsNamed', { name: deck.name })" @click="openDeck(deck)">{{ t('deck.details') }}</button></div>
+              <div class="selection-actions"><button class="button button-small button-primary" :disabled="busy || props.busy" :aria-label="t('deck.chooseNamed', { name: deck.name })" @click.stop="choosePrepared(deck)">{{ t('deck.choose') }}</button><button class="button button-small button-ghost" :disabled="busy || props.busy" :aria-label="t('deck.detailsNamed', { name: deck.name })" @click.stop="openDeck(deck)">{{ t('deck.details') }}</button></div>
             </article>
           </div>
           <div v-else class="starter-loading deck-filter-empty" role="status"><span class="loading-glyph">⌕</span><h3>{{ t('deck.noColorDecks') }}</h3><p>{{ t('deck.clearOrChoose') }}</p><button class="button button-small button-ghost" type="button" @click="selectedColors = []">{{ t('deck.clearFilter') }}</button></div>
@@ -435,6 +441,7 @@ function clearSuccess(): void { successEvent.value = undefined; }
           <div class="import-format"><span class="format-label">{{ t('deck.acceptedFormat') }}</span><code>Commander:<br>1 Commander name<br><br>Deck:<br>35 Plains<br>64 other cards</code><span>{{ t('deck.importFormatHelp') }}</span></div>
           <label class="field-label" for="deck-import">{{ t('deck.yourList') }}</label><textarea id="deck-import" v-model="importText" class="deck-textarea" spellcheck="false" placeholder="Commander:&#10;1 Commander name&#10;&#10;Deck:&#10;1 Other card name"></textarea>
           <div class="import-actions"><span>{{ t('deck.importSavedWhileOpen') }}</span><div><button class="button button-small button-ghost" type="button" :disabled="busy" @click="resolveImport">{{ busy ? t('deck.checking') : t('deck.checkList') }}</button><button class="button button-small button-primary" type="button" :disabled="busy" @click="importList">{{ busy ? t('deck.fetchingCards') : t('deck.saveAndCheck') }} <span aria-hidden="true">↗</span></button></div></div>
+
         </div>
 
         <div v-else>
@@ -565,21 +572,24 @@ function clearSuccess(): void { successEvent.value = undefined; }
   .starter-art .commander-thumbnails { --commander-thumbnail-width: 28px; }
 }
 
-.selection-mode .workshop-footer, .selection-mode .collection-rail, .selection-mode .deck-preview, .selection-mode .workshop-header-meta, .selection-mode .format-pill, .selection-mode .selected-deck-bar, .selection-mode .starter-kicker, .selection-mode .starter-commander, .selection-mode .starter-meta, .selection-mode .art-stamp, .selection-mode .art-index, .selection-mode .art-sig { display:none; }
+.selection-mode .workshop-footer, .selection-mode .collection-rail, .selection-mode .deck-preview, .selection-mode .workshop-header-meta, .selection-mode .format-pill, .selection-mode .selected-deck-bar, .selection-mode .starter-kicker, .selection-mode .starter-meta, .selection-mode .art-stamp, .selection-mode .art-index, .selection-mode .art-sig { display:none; }
 .selection-mode .workshop-main { display:block; max-width:1100px; margin:auto; padding:28px 24px; }
 .selection-mode .workshop-editor { width:100%; padding:0; }
-.selection-mode .starter-deck-grid { grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
+.selection-mode .starter-deck-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%, 260px),1fr)); }
 .selection-mode .starter-art { min-height:120px; height:140px; }
 .selection-mode .starter-art .commander-thumbnails { --commander-thumbnail-width:72px; }
 .selection-mode .starter-art :deep(.commander-thumbnail:not(:only-child)) { width:32px; }
-.selection-mode .starter-copy { padding:16px; }
-.selection-mode .starter-card { grid-template-columns:76px minmax(0,1fr); min-height:180px; }
-.selection-mode .starter-art { width:76px; height:120px; min-height:120px; }
+.selection-mode .starter-copy { align-self:end; padding:16px 12px 8px 16px; }
+.selection-mode .starter-card { grid-template-columns:76px minmax(0,1fr); grid-template-rows:1fr auto; min-height:150px; padding:0; }
+.selection-mode .starter-art { grid-row:1 / 3; align-self:stretch; width:76px; height:auto; min-height:120px; padding:0 6px; }
 .selection-mode .starter-copy strong { white-space:normal; overflow-wrap:anywhere; line-height:1.4; }
-.selection-mode .selection-actions { grid-column:1/-1; align-items:center; padding:8px 12px 12px; }
+.selection-mode .starter-commander { white-space:normal; overflow-wrap:anywhere; line-height:1.4; }
+.selection-mode .selection-actions { grid-column:2; align-self:start; align-items:center; flex-wrap:nowrap; padding:0 12px 16px 16px; }
+.selection-mode .selection-actions .button { white-space:nowrap; padding-inline:8px; }
 .selection-mode .workshop-header .wordmark { display:flex; align-items:center; gap:8px; }
 .selection-actions { display:flex; gap:6px; flex-wrap:wrap; padding:0 16px 16px; }
-.starter-card { cursor:default; }
+.starter-card { cursor:pointer; }
+.starter-card:focus-visible { outline:2px solid var(--lime); outline-offset:2px; }
 .selection-mode .deck-page-title { margin:22px 0; min-height:0; }
 .workshop-shell .workshop-back { display:inline-flex; }
 @media(max-width:500px) { .selection-mode .workshop-main { padding:20px 16px; } .selection-mode .starter-deck-grid { grid-template-columns:1fr; } }

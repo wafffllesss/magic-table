@@ -16,7 +16,7 @@ const cards = computed(() => Array.from({ length: quantity.value }, (_, index) =
 </script>
 
 <template>
-  <div class="opponent-hand" :class="{ 'is-empty': !quantity }" :data-menu-hand-seat="seatId" role="img" :aria-label="t('table.opponentHand', { name: playerName, count: quantity }, quantity)" :style="{ '--held-card-width': `${CARD_SIZE.width}px`, '--held-card-height': `${CARD_SIZE.height}px` }">
+  <div class="opponent-hand" :class="{ 'is-empty': !quantity }" :data-menu-hand-seat="seatId" role="group" tabindex="0" aria-haspopup="menu" :aria-label="t('table.opponentHand', { name: playerName, count: quantity }, quantity)" :style="{ '--held-card-width': `${CARD_SIZE.width}px`, '--held-card-height': `${CARD_SIZE.height}px` }">
     <div v-if="quantity" class="opponent-hand-cards" aria-hidden="true">
       <div class="opponent-hand-fan">
         <span v-for="(style, index) in cards" :key="index" class="opponent-hand-card" :style="style">
@@ -37,7 +37,7 @@ const cards = computed(() => Array.from({ length: quantity.value }, (_, index) =
   height: var(--held-card-height);
   transform: translateX(-50%);
   transform-style: preserve-3d;
-  pointer-events: none;
+  pointer-events: auto;
   user-select: none;
 }
 

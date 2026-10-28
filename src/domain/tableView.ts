@@ -23,6 +23,12 @@ export type ViewMode = 'seat' | 'overview';
 type Vec3 = { x: number; y: number; z: number };
 export type TableView = { eye: Vec3; right: Vec3; down: Vec3; forward: Vec3; perspective: number; centerX: number; centerY: number; transform: string };
 
+export function shortestSeatRotation(from: number, to: number): number {
+  const distance = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  // Angles increase clockwise in table coordinates, matching the turn order.
+  return Math.abs(Math.abs(distance) - Math.PI) < 1e-10 ? Math.PI : distance;
+}
+
 const up = { x: 0, y: 0, z: 1 };
 const subtract = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
 const dot = (a: Vec3, b: Vec3): number => a.x * b.x + a.y * b.y + a.z * b.z;
@@ -31,13 +37,14 @@ const normalize = (v: Vec3): Vec3 => { const length = Math.hypot(v.x, v.y, v.z) 
 const scale = (v: Vec3, amount: number): Vec3 => ({ x: v.x * amount, y: v.y * amount, z: v.z * amount });
 const add = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
 
-export function createTableView(width: number, height: number, seatId: SeatPosition | undefined, mode: ViewMode, yaw = 0, pitch = 0, fov = 55, reservedRight = 0, lean = 0): TableView {
+export function createTableView(width: number, height: number, seatId: SeatPosition | undefined, mode: ViewMode, yaw = 0, pitch = 0, fov = 55, reservedRight = 0, lean = 0, orbitAngle?: number): TableView {
   const centerX = (width - reservedRight) / 2;
   const centerY = height / 2;
   const perspective = height / (2 * Math.tan(Math.max(FOV_LIMITS.min, Math.min(FOV_LIMITS.max, fov)) * Math.PI / 360));
   const center = TABLE_SIZE / 2;
   const seat = seatId ? SEAT_PLACEMENT[seatId] : undefined;
-  const outward = seat ? normalize({ x: seat.x - center, y: seat.y - center, z: 0 }) : { x: 0, y: 1, z: 0 };
+  const outward = seat && orbitAngle !== undefined ? { x: Math.cos(orbitAngle), y: Math.sin(orbitAngle), z: 0 }
+    : seat ? normalize({ x: seat.x - center, y: seat.y - center, z: 0 }) : { x: 0, y: 1, z: 0 };
   const inclination = Math.max(0, Math.min(1, lean));
   // Leaning translates the view toward the opponents. Moving the eye and look
   // target together keeps the framing close instead of fitting the whole table.

@@ -1,6 +1,8 @@
 import type { CardDefinition, DeckDefinition, DeckEntry } from './game';
 import { totalCards } from './game';
 
+export class DeckImportError extends Error {}
+
 export function parseDeckText(text: string, id = `deck-${Date.now().toString(36)}`): DeckDefinition {
   const entries = new Map<string, DeckEntry>();
   const names = new Map<string, string>();
@@ -13,23 +15,22 @@ export function parseDeckText(text: string, id = `deck-${Date.now().toString(36)
     if (/^\s*(?:commander|commanders|command zone|zona de comando)\s*:?\s*$/i.test(line)) { commanderSection = true; continue; }
     if (/^\s*(?:deck|mainboard|maindeck|library|biblioteca|baralho)\s*:?\s*$/i.test(line)) { commanderSection = false; continue; }
     const match = line.match(/^(?:(\d+)\s*[xX]?\s+|[xX]\s*(\d+)\s+)?(.+?)\s*(?:\(\s*([\w-]+)\s+([\w-]+)\s*\))?\s*$/);
-    if (!match?.[3]) throw new Error(`Linha ${index + 1}: use "quantidade nome da carta".`);
+    if (!match?.[3]) throw new DeckImportError(`Linha ${index + 1}: use "quantidade nome da carta".`);
     const quantity = Math.max(1, Math.min(100, Number(match[1] ?? match[2] ?? 1)));
     const name = match[3].trim().replace(/\s+/g, ' ');
     const key = name.toLocaleLowerCase('pt-BR');
     if (commanderSection) {
-      if (quantity !== 1 || commanders.some(item => item.toLocaleLowerCase('pt-BR') === key)) throw new Error('Cada comandante pode aparecer apenas uma vez na zona de comando.');
+      if (quantity !== 1 || commanders.some(item => item.toLocaleLowerCase('pt-BR') === key)) throw new DeckImportError('Cada comandante pode aparecer apenas uma vez na zona de comando.');
       commanders.push(name);
       entries.set(key, { cardId: key, name, quantity: 1, role: 'commander' });
     } else {
-      if (entries.has(key) && entries.get(key)!.role === 'commander') throw new Error(`${name} já foi declarado como comandante.`);
+      if (entries.has(key) && entries.get(key)!.role === 'commander') throw new DeckImportError(`${name} já foi declarado como comandante.`);
       const existing = entries.get(key);
       entries.set(key, { cardId: key, name: existing?.name ?? name, quantity: (existing?.quantity ?? 0) + quantity, role: 'library' });
     }
   }
-  if (commanders.length < 1 || commanders.length > 2) throw new Error('Declare um ou dois comandantes em uma seção "Commander:".');
+  if (commanders.length < 1 || commanders.length > 2) throw new DeckImportError('Declare um ou dois comandantes em uma seção "Commander:".');
   const result: DeckDefinition = { id, name: 'Deck importado', format: 'commander', commanders: commanders.map(name => name.toLocaleLowerCase('pt-BR')), entries: [...entries.values()], updatedAt: Date.now() };
-  if (totalCards(result) !== 100) throw new Error(`O deck tem ${totalCards(result)} cartas. Commander exige exatamente 100, contando o(s) comandante(s).`);
   return result;
 }
 

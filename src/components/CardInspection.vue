@@ -142,7 +142,6 @@ onBeforeUnmount(() => {
       <section ref="dialog" class="shared-inspection-dialog" :role="active.pinned ? 'dialog' : undefined" :aria-modal="active.pinned || undefined" :aria-label="t('inspection.label', { card: shownFace?.name ?? t('table.card') })" tabindex="-1">
         <div ref="art" class="shared-inspection-art" :style="artStyle" @pointerenter="enterCardInspection()" @pointerleave="leaveCardInspection()">
           <CardTile :definition="definition" :face="face" inspection :zoom-enabled="false" />
-          <span v-if="plusCounters > 0" class="shared-inspection-counter">+{{ plusCounters }}/+{{ plusCounters }}</span>
         </div>
         <div class="shared-inspection-copy" :style="copyStyle" :inert="!details" @pointerenter="enterCardInspection()" @pointerleave="leaveCardInspection()">
           <button class="shared-inspection-close" type="button" :aria-label="t('inspection.close')" @click="closeCardInspection()">×</button>
@@ -153,6 +152,7 @@ onBeforeUnmount(() => {
           <div class="shared-inspection-type">{{ shownFace?.type_line }}</div>
           <p><ManaText :text="shownFace?.oracle_text || t('inspection.unavailable')" /></p>
           <strong v-if="shownFace?.power || shownFace?.toughness || shownFace?.loyalty" class="shared-inspection-stats">{{ shownFace?.power || shownFace?.toughness ? `${shownFace?.power ?? '—'} / ${shownFace?.toughness ?? '—'}` : shownFace?.loyalty }}</strong>
+          <div v-if="plusCounters > 0" class="shared-inspection-counters"><span class="shared-inspection-counter">+{{ plusCounters }}/+{{ plusCounters }}</span></div>
           <div v-if="(definition?.card_faces?.length ?? 0) > 1" class="shared-inspection-faces"><button v-for="(item, index) in definition?.card_faces" :key="index" type="button" :aria-pressed="face === index" @click="face = index">{{ item.name }}</button></div>
           <small v-if="content?.quantity">{{ t('inspection.deckQuantity', { count: content.quantity }) }}</small>
           <small>{{ t('inspection.escapeClose') }}</small>
@@ -171,7 +171,8 @@ onBeforeUnmount(() => {
 .shared-card-inspection.is-pinned .shared-inspection-backdrop { pointer-events:auto; }
 .shared-inspection-dialog { position:absolute; inset:0; outline:none; pointer-events:none; }
 .shared-inspection-art { position:absolute; left:0; top:0; transform-origin:0 0; pointer-events:none; filter:drop-shadow(0 24px 38px #000a); }
-.shared-inspection-counter { position:absolute; left:50%; bottom:7%; transform:translateX(-50%); padding:5px 9px; border:1px solid #d5ef9a; border-radius:999px; background:#192718ed; color:#e7f6cf; box-shadow:0 3px 9px #000a; font:700 clamp(13px,1.25vw,18px) var(--mono); white-space:nowrap; }
+.shared-inspection-counters { display:flex; justify-content:flex-end; margin-top:10px; }
+.shared-inspection-counter { padding:5px 9px; border:1px solid #d5ef9a; border-radius:999px; background:#192718ed; color:#e7f6cf; font:700 clamp(13px,1.25vw,18px) var(--mono); white-space:nowrap; }
 .shared-inspection-art .card-tile-fallback b { font-size:clamp(18px,2vw,28px); }
 .shared-inspection-art .card-tile-fallback small { font-size:clamp(12px,1.4vw,18px); }
 .shared-inspection-art .card-tile-fallback i { font-size:32px; }

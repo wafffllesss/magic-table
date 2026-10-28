@@ -24,7 +24,21 @@ async function checkForUpdate(currentVersion, fetcher = fetch, timeout = 8000) {
     if (!latest || !releaseUrl(release.html_url, release.tag_name)) return null;
     const comparison = latest.findIndex((part, index) => part !== current[index]);
     if (comparison < 0 || latest[comparison] < current[comparison]) return null;
-    return { currentVersion, version: release.tag_name.slice(1), url: release.html_url };
+    const version = release.tag_name.slice(1);
+    const notes = {};
+    await Promise.all(['en', 'pt-BR'].map(async locale => {
+      const name = `${version}.${locale}.md`;
+      const asset = Array.isArray(release.assets) && release.assets.find(item => item.name === name);
+      const expected = `https://github.com/wafffllesss/magic-table/releases/download/${release.tag_name}/${name}`;
+      if (!asset || asset.browser_download_url !== expected || (typeof asset.size === 'number' && asset.size > 65536)) return;
+      try {
+        const response = await fetcher(expected, { signal: controller.signal });
+        if (!response.ok) return;
+        const body = await response.text();
+        if (body.length <= 65536) notes[locale] = body;
+      } catch { /* Missing notes must not prevent access to the release. */ }
+    }));
+    return { currentVersion, version, url: release.html_url, notes };
   } catch { return null; } finally { clearTimeout(timer); }
 }
 module.exports = { checkForUpdate, releaseUrl, parseVersion };

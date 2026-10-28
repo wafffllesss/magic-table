@@ -16,3 +16,18 @@ test('network errors, rate limits and aborts do not block startup', async () => 
   assert.equal(await checkForUpdate('1.0.0', async () => ({ ok: false, status: 403 })), null);
   assert.equal(await checkForUpdate('1.0.0', (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(Error('timeout')))), 5), null);
 });
+
+test('loads only matching release assets and keeps download available when a note fails', async () => {
+  const asset = locale => ({ name: `1.10.0.${locale}.md`, browser_download_url: `https://github.com/wafffllesss/magic-table/releases/download/v1.10.0/1.10.0.${locale}.md` });
+  const release = { ...valid, assets: [asset('en'), asset('pt-BR')] };
+  const result = await checkForUpdate('1.0.0', async url => {
+    if (url.includes('/releases/latest')) return { ok: true, json: async () => release };
+    if (url.endsWith('.pt-BR.md')) throw Error('offline');
+    return { ok: true, text: async () => '# Features\n- New' };
+  });
+  assert.deepEqual(result.notes, { en: '# Features\n- New' });
+  assert.equal(result.url, valid.html_url);
+  release.assets[0].browser_download_url = 'https://evil.example/notes';
+  const invalid = await checkForUpdate('1.0.0', async url => url.includes('/releases/latest') ? { ok: true, json: async () => release } : { ok: false });
+  assert.deepEqual(invalid.notes, {});
+});

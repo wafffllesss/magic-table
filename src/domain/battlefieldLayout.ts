@@ -13,10 +13,13 @@ function category(card: CardInstance): 'land' | 'support' | 'creature' {
 export function battlefieldPosition(card: CardInstance, cards: Iterable<CardInstance>, x?: number, y?: number): { x: number; y: number } {
   const kind = category(card);
   const occupied = Array.from(cards).filter(other => other.id !== card.id && other.zone === 'battlefield' && other.controllerId === card.controllerId);
-  const columns = kind === 'land' ? [9, 24, 39, 54, 69, 84] : [39, 54, 69, 84, 24, 9];
-  const rows = kind === 'land' ? [18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 82] : kind === 'support' ? [18, 50, 82] : [82, 50, 18];
+  const columns = kind === 'land' ? [84, 69, 54, 39, 24, 9] : [9, 24, 39, 54, 69, 84];
+  const rows = kind === 'land' ? [82, 76, 70, 64, 58, 52, 46, 40, 34, 28, 22, 18] : kind === 'support' ? [82, 50, 18] : [18, 50, 82];
+  const candidates = kind === 'land'
+    ? columns.flatMap(column => rows.map(row => ({ column, row })))
+    : rows.flatMap(row => columns.map(column => ({ column, row })));
   let best = { x: 49, y: 50 }; let bestScore = Infinity;
-  for (const column of columns) for (const row of rows) {
+  for (const { column, row } of candidates) {
     const candidate = clampCardPosition(x ?? column, y ?? row);
     let score = 0;
     for (const other of occupied) {

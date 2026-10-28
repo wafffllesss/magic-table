@@ -1,7 +1,4 @@
 {
-  "functions": {
-    "source": "functions"
-  },
   "auth": {
     "providers": {
       "anonymous": true
@@ -16,9 +13,6 @@
     },
     "database": {
       "port": 9000
-    },
-    "functions": {
-      "port": 5001
     },
     "singleProjectMode": true
   }

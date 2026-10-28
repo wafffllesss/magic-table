@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { PLAYMATS } from '../services/playmats';
+import { PLAYMATS, playmatColor, playmatCustomImage } from '../services/playmats';
 import { useAdaptiveImage } from '../services/adaptiveImage';
 import { downloadImage, imageQueue, type ImageOptions } from '../services/imageQueue';
 
 const props = defineProps<{ id?: string }>();
 const element = ref<HTMLElement>();
+const color = computed(() => playmatColor(props.id));
+const customImage = computed(() => playmatCustomImage(props.id));
+const colorStyle = computed(() => color.value ? {
+  backgroundColor: color.value,
+  backgroundImage: `linear-gradient(135deg, ${color.value}, color-mix(in srgb, ${color.value} 75%, black))`,
+} : undefined);
 const source = computed(() => {
   const mat = PLAYMATS.find(item => item.id === props.id);
   return {
@@ -24,8 +30,9 @@ const { imageUrl, resolution } = useAdaptiveImage(element, source);
 </script>
 
 <template>
-  <span ref="element" class="adaptive-playmat" :data-image-width="resolution || undefined">
-    <img v-if="imageUrl" :src="imageUrl" alt="" decoding="async" draggable="false">
+  <span ref="element" class="adaptive-playmat" :style="colorStyle" :data-image-width="resolution || undefined">
+    <img v-if="customImage" :src="customImage" alt="" decoding="async" draggable="false" referrerpolicy="no-referrer">
+    <img v-else-if="imageUrl" :src="imageUrl" alt="" decoding="async" draggable="false">
   </span>
 </template>
 

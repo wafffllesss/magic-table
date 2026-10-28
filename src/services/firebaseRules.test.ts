@@ -102,6 +102,9 @@ describe.skipIf(!emulator)('Realtime Database security rules', () => {
     const bob = testEnvironment.authenticatedContext('player-b').database();
     const coordinator = testEnvironment.authenticatedContext('player-c').database();
     await assertSucceeds(set(ref(alice, path), 'azorius'));
+    await assertSucceeds(set(ref(alice, path), 'color:#aabbcc'));
+    await assertSucceeds(set(ref(alice, path), 'image:https://example.com/art.jpg'));
+    await assertFails(set(ref(alice, path), 'image:javascript:alert(1)'));
     await assertFails(set(ref(alice, path), 'unlisted-wallpaper'));
     await assertFails(set(ref(bob, path), 'dimir'));
     await assertFails(set(ref(coordinator, path), 'izzet'));

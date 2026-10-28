@@ -52,7 +52,7 @@ pnpm test:firebase
 pnpm build
 ```
 
-`test:rules` and `test:firebase` start local Firebase emulators and require Java 21+. The latter uses isolated browser profiles and checks multiplayer behavior. Run `npm ci && npm run build` in `functions/` with Node 22. Performance measurements and their limitations are described in [the performance report](docs/performance.md).
+`test:rules` and `test:firebase` start local Firebase emulators and require Java 21+. The latter uses isolated browser profiles and checks multiplayer behavior. Performance measurements and their limitations are described in [the performance report](docs/performance.md).
 
 ## Contributing and security
 
@@ -61,3 +61,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md
 The bundled Wizards-derived playmats require a rights review before this repository or its builds are made public. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
 The desktop app checks GitHub for a newer stable release at startup and prepares the starter and local decks, caching card data and small front images. The first preparation may take longer; it can be skipped, and missing cards and images can be loaded later. If an update is available, its release page opens in the browser; close the old app and replace the portable executable manually.
+
+Release notes are stored in `changelogs/<version>.en.md` and `changelogs/<version>.pt-BR.md`. Each file must include `# Features` and `# Fixes and adjustments`. Keep at most ten versions; the release workflow validates and attaches both files for the selected version. The app shows the notes once per version and makes its available history accessible from the version indicator.

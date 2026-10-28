@@ -17,7 +17,8 @@ export interface RoomService {
   join(code: string, playerName: string, password?: string): Promise<JoinedRoom>;
   list(cursor?: number): Promise<RoomSnapshot>;
   leave(): Promise<void>;
-  saveProfile(deckName: string, deckSummary: RoomMember['deckSummary'], playmatId?: string): Promise<void>;
+  saveProfile(deckName: string, deckSummary: RoomMember['deckSummary'], playmatId?: string | null): Promise<void>;
+  setPlaymat(playmatId?: string): Promise<void>;
   setReady(ready: boolean): Promise<void>;
   createSignalBus(roomId: string): RoomSignalBus;
   createDataBus(roomId: string): RoomDataBus;
@@ -205,12 +206,17 @@ export class RoomBackend implements RoomService {
     return { rooms, nextCursor: rooms.length === 20 ? Math.min(...rooms.map(room => room.createdAt)) - 1 : null };
   }
 
-  async saveProfile(deckName: string, deckSummary: RoomMember['deckSummary'], playmatId?: string): Promise<void> {
+  async saveProfile(deckName: string, deckSummary: RoomMember['deckSummary'], playmatId?: string | null): Promise<void> {
     const roomId = this.requireActiveRoom();
-    const fields: Partial<RoomMember> = { deckName, deckSummary: deckSummary ?? [] };
+    const fields: Partial<Omit<RoomMember, 'playmatId'>> & { playmatId?: string | null } = { deckName, deckSummary: deckSummary ?? [] };
     if (playmatId !== undefined) fields.playmatId = playmatId;
     await update(ref(this.requireDatabase(), `p2pRooms/${roomId}/members/${this.requireUid()}`), fields);
     await this.syncDirectory(roomId);
+  }
+
+  async setPlaymat(playmatId?: string): Promise<void> {
+    const roomId = this.requireActiveRoom();
+    await set(ref(this.requireDatabase(), `p2pRooms/${roomId}/members/${this.requireUid()}/playmatId`), playmatId ?? null);
   }
 
   async setReady(ready: boolean): Promise<void> {

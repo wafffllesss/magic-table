@@ -28,6 +28,11 @@ describe('TURN Worker', () => {
     expect(fetch.mock.calls[0][0]).toContain(`auth=${token}`);
     expect(fetch.mock.calls[2][1]).toMatchObject({ method: 'POST', body: '{"ttl":3600}' });
   });
+  it('ignores additional Cloudflare STUN URLs without discarding TURN credentials', async () => {
+    const response = await handleRequest(request(await sign()), env, { verify, fetch: fetchMock({ uid: 'user123' }, { closed: false }, { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.cloudflare.com:443'] }, turn.iceServers[1]] }) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).iceServers).toEqual([turn.iceServers[1]]);
+  });
   it('rejects invalid, expired and wrongly addressed tokens before database access', async () => {
     const otherKey = await generateKeyPair('RS256');
     const forged = await new SignJWT({ auth_time: Math.floor(Date.now() / 1000) }).setProtectedHeader({ alg: 'RS256' }).setSubject('user123').setAudience('project').setIssuer('https://securetoken.google.com/project').setIssuedAt().setExpirationTime('1h').sign(otherKey.privateKey);

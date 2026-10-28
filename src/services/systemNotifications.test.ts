@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MatchState } from '../domain/game';
 import type { RoomSnapshot } from './firebaseRoom';
-import { RoomNotificationTracker, showSystemNotification } from './systemNotifications';
+import { RoomNotificationTracker, chatNotification, showSystemNotification } from './systemNotifications';
 
 const base = (): RoomSnapshot => ({ roomId: 'room', selfUid: 'self', selfSeatId: 'southWest', connectionState: 'connected', membersReady: true, online: true, seats: {}, queue: [] });
 const spectator = (online = true) => ({ uid: 'guest', name: 'Guest', requestedAt: 1, position: 1, online });
@@ -42,6 +42,18 @@ describe('room notifications', () => {
 });
 
 afterEach(() => vi.unstubAllGlobals());
+describe('chat notifications', () => {
+  it('includes the original message and sender, respects settings, and ignores own messages', () => {
+    const room = base();
+    room.seats.northWest = { uid: 'guest', name: 'Guest', online: true, joinedAt: 1 };
+    const message = { id: 'id', uid: 'guest', seatId: 'northWest', text: 'Olá 👋', at: 1 };
+    expect(chatNotification(message, room, true)).toEqual({ name: 'Guest', body: 'Olá 👋' });
+    expect(chatNotification(message, room, false)).toBeUndefined();
+    expect(chatNotification({ ...message, uid: 'self' }, room, true)).toBeUndefined();
+    expect(chatNotification({ ...message, uid: 'unknown' }, room, true)).toEqual({ name: undefined, body: 'Olá 👋' });
+  });
+});
+
 describe('notification delivery', () => {
   it('requires browser permission and a background tab, and focuses on click', () => {
     const focus = vi.fn(); const close = vi.fn(); const instances: Array<{ onclick?: () => void; close: typeof close }> = [];

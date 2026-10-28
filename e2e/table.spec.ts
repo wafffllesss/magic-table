@@ -22,6 +22,26 @@ test('starts the local Commander table and provides four seats', async ({ page }
   await expect(page.locator('.own-hand-fan .fan-card')).toHaveCount(7);
 });
 
+test('does not outline the table after Enter in the demo, while preserving keyboard focus', async ({ page }) => {
+  await page.evaluate(async id => {
+    const { localRepository } = await import('/src/services/storage.ts');
+    await localRepository.setPreference('player-name', 'Lia');
+    await localRepository.setPreference('selected-deck-id', id);
+    await localRepository.setPreference('hide-table-tutorial', true);
+  }, preconFixtureDecks()[0].id);
+  await page.reload();
+  await page.getByRole('button', { name: 'DEMO', exact: true }).click();
+  const stage = page.locator('.table-stage');
+  await stage.click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('Enter');
+  await expect(stage).not.toHaveClass(/keyboard-focus/);
+  await expect(stage).toHaveCSS('outline-style', 'none');
+  await page.locator('.table-topbar select').focus();
+  await page.keyboard.press('Tab');
+  await expect(stage).toBeFocused();
+  await expect(stage).toHaveClass(/keyboard-focus/);
+});
+
 test('starts a table and updates targets without recursive reactive updates', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(String(error)));
@@ -485,4 +505,43 @@ test('renders the 200-object public stress scene within the browser heap budget'
   const heapBytes = await page.evaluate(() => (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0);
   expect(heapBytes).toBeGreaterThan(0);
   expect(heapBytes).toBeLessThan(150 * 1024 * 1024);
+});
+
+
+test('custom colors and image URLs respect local visibility settings', async ({ page }) => {
+  await page.route('https://getwallpapers.com/wallpaper/full/7/f/e/540681.jpg', route => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aWQAAAAASUVORK5CYII=', 'base64') }));
+  await page.goto('/');
+  await page.evaluate(async () => {
+    const vueUrl = performance.getEntriesByType('resource').map(entry => entry.name).find(url => url.includes('/node_modules/.vite/deps/vue.js')) ?? '/node_modules/.vite/deps/vue.js';
+    const { createApp, reactive, h } = await import(vueUrl);
+    const { default: GameTable } = await import('/src/components/GameTable.vue');
+    const { localRepository } = await import('/src/services/storage.ts');
+    await localRepository.setPreference('hide-table-tutorial', true);
+    const seat = { id: 'southWest', name: 'Lia', status: 'playing', commanderIds: [], library: [], hand: [], mulligans: 0, keptHand: true, life: 40, poison: 0, commanderCasts: {}, commanderDamage: {}, landPlays: 0 };
+    const state = { id: 'mat-e2e', revision: 0, phase: 'playing', paused: false, activeSeatId: 'southWest', turn: 1, step: 'Principal', seats: [seat], cards: {}, stack: [], passes: [], log: [], updatedAt: Date.now() };
+    const props = reactive({ state, seatId: 'southWest', playmatIds: {}, online: false, customPlaymatsDisabled: false, playmatColorsDisabled: false });
+    const host = document.createElement('div'); host.style.cssText = 'position:fixed;inset:0;z-index:1000'; document.body.append(host);
+    createApp({ render: () => h(GameTable, { ...props, onSetPlaymat: (id: string) => { props.playmatIds = { southWest: id }; }, onSetCustomPlaymatsDisabled: (value: boolean) => { props.customPlaymatsDisabled = value; }, onSetPlaymatColorsDisabled: (value: boolean) => { props.playmatColorsDisabled = value; } }) }).mount(host);
+  });
+  const mat = page.locator('.mat-southWest');
+  await page.getByRole('button', { name: 'Personalizar playmat' }).click();
+  await page.getByLabel('Cor sólida').fill('#aabbcc');
+  await page.getByRole('button', { name: 'Aplicar playmat' }).click();
+  await expect(mat.locator('.playmat-art')).toHaveCSS('background-color', 'rgb(170, 187, 204)');
+  await expect(mat.locator('.playmat-art')).toHaveCSS('background-image', /linear-gradient/);
+  await page.getByRole('button', { name: 'Configurações' }).click();
+  await page.getByRole('checkbox', { name: /Desativar todos os playmats personalizados/ }).check();
+  await expect(mat.locator('.playmat-art')).toHaveCount(1);
+  await page.getByRole('checkbox', { name: /Desativar também cores de playmats/ }).check();
+  await expect(mat.locator('.playmat-art')).toHaveCount(0);
+  await page.getByRole('dialog', { name: 'Configurações' }).getByRole('button', { name: 'Fechar' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Personalizar playmat' }).click();
+  await page.getByLabel('Imagem personalizada').fill('https://getwallpapers.com/wallpaper/full/7/f/e/540681.jpg');
+  await page.getByRole('button', { name: 'Aplicar playmat' }).click();
+  await expect(mat.locator('.playmat-art')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Configurações' }).click();
+  await page.getByRole('checkbox', { name: /Desativar todos os playmats personalizados/ }).uncheck();
+  await expect(mat.locator('.playmat-art img')).toHaveAttribute('src', 'https://getwallpapers.com/wallpaper/full/7/f/e/540681.jpg');
+  await expect.poll(() => mat.locator('.playmat-art img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
 });

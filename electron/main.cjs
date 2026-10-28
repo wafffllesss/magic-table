@@ -67,7 +67,7 @@ async function copyLegacyProfile() {
 if (gotLock) {
   ipcMain.handle('notifications:show', (event, payload) => {
     if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) return;
-    if (window.isFocused() || !Notification.isSupported() || !payload || typeof payload.title !== 'string' || typeof payload.body !== 'string' || payload.title.length > 120 || payload.body.length > 300) return;
+    if (window.isFocused() || !Notification.isSupported() || !payload || typeof payload.title !== 'string' || typeof payload.body !== 'string' || payload.title.length > 120 || payload.body.length > 65536) return;
     const notification = new Notification({ title: payload.title, body: payload.body });
     notification.on('click', () => { if (!window || window.isDestroyed()) return; if (window.isMinimized()) window.restore(); window.show(); window.focus(); });
     notification.show();
@@ -189,7 +189,7 @@ if (gotLock) {
     window.webContents.setWindowOpenHandler(({ url }) => {
       try {
         const parsed = new URL(url);
-        if (parsed.protocol === 'https:' && ['scryfall.com', 'magic.wizards.com'].includes(parsed.hostname)) void shell.openExternal(url);
+        if (parsed.protocol === 'https:' && (['scryfall.com', 'magic.wizards.com'].includes(parsed.hostname) || (parsed.hostname === 'github.com' && parsed.pathname === '/wafffllesss/'))) void shell.openExternal(url);
       } catch {}
       return { action: 'deny' };
     });

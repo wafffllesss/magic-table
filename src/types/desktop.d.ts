@@ -5,7 +5,7 @@ declare global {
     meuMagicDesktop?: {
       isElectron: true;
       showNotification(title: string, body: string): Promise<void>;
-      checkForUpdate(): Promise<{ currentVersion: string; version: string; url: string } | null>;
+      checkForUpdate(): Promise<{ currentVersion: string; version: string; url: string; notes?: Partial<Record<'en' | 'pt-BR', string>> } | null>;
       openUpdate(): Promise<void>;
       onInvite(callback: (code: string) => void): () => void;
       onBeforeQuit(callback: () => void): () => void;

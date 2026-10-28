@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CAMERA_PITCH_LIMITS, CARD_AREA, CARD_SIZE, MAT_HEIGHT, MAT_WIDTH, TABLE_SIZE, ZONE_GAP, ZONE_STEP, SEAT_PLACEMENT, clampCameraPitch, clampCardPosition, createTableView, projectPoint, screenToCardPosition, screenToMat, screenToTable, type SeatPosition } from './tableView';
+import { CAMERA_PITCH_LIMITS, CARD_AREA, CARD_SIZE, MAT_HEIGHT, MAT_WIDTH, TABLE_SIZE, ZONE_GAP, ZONE_STEP, SEAT_PLACEMENT, clampCameraPitch, clampCardPosition, createTableView, projectPoint, screenToCardPosition, screenToMat, screenToTable, shortestSeatRotation, type SeatPosition } from './tableView';
 
 function worldPoint(seatId: SeatPosition, localX: number, localY: number): { x: number; y: number; z: number } {
   const seat = SEAT_PLACEMENT[seatId];
@@ -9,6 +9,14 @@ function worldPoint(seatId: SeatPosition, localX: number, localY: number): { x: 
 }
 
 describe('square table projection', () => {
+  it('chooses clockwise for opposite seats and otherwise the shorter rotation', () => {
+    for (const angle of [-Math.PI / 2, 0, Math.PI / 2, Math.PI, 3 * Math.PI]) {
+      expect(shortestSeatRotation(angle, angle + Math.PI)).toBeCloseTo(Math.PI);
+      expect(shortestSeatRotation(angle, angle - Math.PI)).toBeCloseTo(Math.PI);
+      expect(shortestSeatRotation(angle, angle + Math.PI / 2)).toBeCloseTo(Math.PI / 2);
+      expect(shortestSeatRotation(angle, angle - Math.PI / 2)).toBeCloseTo(-Math.PI / 2);
+    }
+  });
   it('allows a lower seat-view pitch to expose more of the local playmat', () => {
     expect(CAMERA_PITCH_LIMITS.min).toBe(-18);
     expect(clampCameraPitch(-30)).toBe(-18);

@@ -11,8 +11,8 @@ async function harness(page: Page) {
     import CardInspection from '/src/components/CardInspection.vue';
     import { cardInspection, openCardInspection, closeCardInspection } from '${controller}';
     const visible = ref(true), hidden = ref(false);
-    const definition = { id:'front',name:'Front // Back',layout:'transform',mana_cost:'{G}',type_line:'Creature',oracle_text:'Test rules',card_faces:[{name:'Front',mana_cost:'{G}',type_line:'Creature',oracle_text:'Front rules'},{name:'Back',mana_cost:'',type_line:'Creature',oracle_text:'Back rules'}] };
-    const card = () => ({id:'one',card:definition,faceDown:hidden.value,face:0});
+    const definition = { id:'front',name:'Front // Back',layout:'transform',mana_cost:'{G}',type_line:'Creature',oracle_text:'Test rules',card_faces:[{name:'Front',mana_cost:'{G}',type_line:'Creature',oracle_text:'Front rules',power:'1',toughness:'3'},{name:'Back',mana_cost:'',type_line:'Creature',oracle_text:'Back rules'}] };
+    const card = () => ({id:'one',card:definition,faceDown:hidden.value,face:0,counters:{'+1/+1':3}});
     const { initializeLocale } = await import('/src/i18n/index.ts');
     initializeLocale('pt-BR', ['pt-BR']);
     createApp({setup:()=>()=>h('div',{},[
@@ -89,6 +89,8 @@ test('explicit inspection pins, supports faces and restores keyboard focus', asy
   await page.locator('#one').click();
   await expect(page.getByRole('dialog')).toBeFocused();
   await expect(page.locator('.shared-inspection-copy')).toBeVisible();
+  await expect(page.locator('.shared-inspection-art .shared-inspection-counter')).toHaveCount(0);
+  await expect(page.locator('.shared-inspection-stats + .shared-inspection-counters')).toHaveText('+3/+3');
   await page.screenshot({path:test.info().outputPath('inspection-wide.png')});
   await page.getByRole('button',{name:'Back',exact:true}).click();
   await expect(page.locator('.shared-inspection-copy h2')).toHaveText('Back');
@@ -140,6 +142,7 @@ test('fits narrow windows and keeps timing with reduced motion', async ({ page }
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
   await expect(page.locator('.shared-inspection-copy')).toBeVisible();
+  await expect(page.locator('.shared-inspection-copy .shared-inspection-counter')).toHaveText('+3/+3');
   const copy = await page.locator('.shared-inspection-copy').boundingBox();
   expect(copy!.y + copy!.height).toBeLessThanOrEqual(740);
   await page.screenshot({path:test.info().outputPath('inspection-narrow.png')});

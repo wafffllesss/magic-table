@@ -21,6 +21,10 @@ export async function handleRequest(request, env, deps = {}) {
   try { body = await request.json(); } catch { return reply({ error: 'Invalid request' }, 400); }
   const room = body?.roomId;
   if (typeof room !== 'string' || !/^[A-Za-z0-9_-]{8,80}$/.test(room)) return reply({ error: 'Invalid request' }, 400);
+  let stage = 'configuration';
+  let upstreamStatus;
+  let responseIssue;
+  let unexpectedUrl;
   try {
     const database = new URL(env.FIREBASE_DATABASE_URL);
     if (database.protocol !== 'https:' || !/(^|\.)(firebaseio\.com|firebasedatabase\.app)$/.test(database.hostname) || database.pathname !== '/' || database.search || database.hash || database.port || database.username || database.password) throw new Error('Invalid configuration');
@@ -30,31 +34,43 @@ export async function handleRequest(request, env, deps = {}) {
       const url = new URL(`/p2pRooms/${room}/${path}.json`, database);
       url.searchParams.set('auth', token);
       const response = await fetcher(url.toString(), { signal: AbortSignal.timeout(7000) });
-      if (!response.ok) throw new Error('Database unavailable');
+      if (!response.ok) { upstreamStatus = response.status; throw new Error('Database unavailable'); }
       return response.json();
     };
+    stage = 'firebase';
     const [member, meta] = await Promise.all([read(`members/${uid}`), read('meta')]);
     if (!member || !meta || meta.closed !== false) return reply({ error: 'Forbidden' }, 403);
     const expiresAt = Date.now() + 3600000;
+    stage = 'cloudflare';
     const response = await fetcher(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.CLOUDFLARE_TURN_KEY_ID}/credentials/generate-ice-servers`, {
       method: 'POST', headers: { Authorization: `Bearer ${env.CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ttl: 3600 }), signal: AbortSignal.timeout(7000),
     });
+    upstreamStatus = response.status;
     if (!response.ok) throw new Error('TURN unavailable');
+    stage = 'cloudflare_response';
     const data = await response.json();
-    if (!Array.isArray(data?.iceServers)) throw new Error('Invalid response');
+    if (!Array.isArray(data?.iceServers)) { responseIssue = 'ice_servers_not_array'; throw new Error('Invalid response'); }
     const iceServers = [];
     for (const entry of data.iceServers) {
       const urls = typeof entry?.urls === 'string' ? [entry.urls] : entry?.urls;
-      if (!Array.isArray(urls) || !urls.length || !urls.every(url => typeof url === 'string')) throw new Error('Invalid response');
+      if (!Array.isArray(urls) || !urls.length || !urls.every(url => typeof url === 'string')) { responseIssue = 'invalid_urls'; throw new Error('Invalid response'); }
       const turnUrls = urls.filter(url => /^turns?:turn\.cloudflare\.com:\d+\?transport=(udp|tcp)$/.test(url));
-      if (turnUrls.length !== urls.filter(url => url !== 'stun:stun.cloudflare.com:3478').length) throw new Error('Invalid response');
+      if (turnUrls.length !== urls.filter(url => !/^stun:stun\.cloudflare\.com:\d+$/.test(url)).length) {
+        responseIssue = 'unexpected_url';
+        const value = urls.find(url => !/^stun:stun\.cloudflare\.com:\d+$/.test(url) && !/^turns?:turn\.cloudflare\.com:\d+\?transport=(udp|tcp)$/.test(url));
+        unexpectedUrl = /^(?:stun|turn|turns):(?:stun|turn)\.cloudflare\.com:\d+(?:\?transport=(?:udp|tcp))?$/.test(value ?? '') ? value : 'unrecognized';
+        throw new Error('Invalid response');
+      }
       if (!turnUrls.length) continue;
-      if (typeof entry.username !== 'string' || !entry.username || typeof entry.credential !== 'string' || !entry.credential) throw new Error('Invalid response');
+      if (typeof entry.username !== 'string' || !entry.username || typeof entry.credential !== 'string' || !entry.credential) { responseIssue = 'missing_credentials'; throw new Error('Invalid response'); }
       iceServers.push({ urls: turnUrls, username: entry.username, credential: entry.credential });
     }
-    if (!iceServers.length || expiresAt <= Date.now()) throw new Error('Invalid response');
+    if (!iceServers.length || expiresAt <= Date.now()) { responseIssue = 'no_turn_servers'; throw new Error('Invalid response'); }
     return reply({ iceServers, expiresAt }, 200);
-  } catch { return reply({ error: 'TURN unavailable' }, 503); }
+  } catch {
+    console.error('TURN credential request failed', { stage, ...(upstreamStatus ? { upstreamStatus } : {}), ...(responseIssue ? { responseIssue } : {}), ...(unexpectedUrl ? { unexpectedUrl } : {}) });
+    return reply({ error: 'TURN unavailable' }, 503);
+  }
 }
 
 export default { fetch: handleRequest };

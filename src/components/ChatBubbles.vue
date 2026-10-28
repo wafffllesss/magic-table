@@ -46,8 +46,8 @@ const groups = computed(() => {
 .chat-bubble-stack { position:absolute; width:max-content; max-width:min(190px, 45vw); display:flex; flex-direction:column; align-items:stretch; gap:5px; transform:translate(-50%, calc(-100% - 16px)); }
 .chat-bubble-stack.is-below { transform:translate(-50%, 16px); }
 .chat-bubble { position:relative; max-width:190px; min-width:65px; padding:7px 10px; border:2px solid #000; border-radius:13px; background:#fff; box-shadow:0 5px 16px #0007; color:#000; font:500 12px/1.35 var(--heading); overflow-wrap:anywhere; white-space:pre-wrap; }
-.chat-bubble-stack::after { content:''; position:absolute; bottom:-8px; left:calc(50% + var(--tail-x)); width:13px; height:13px; transform:translateX(-50%) rotate(45deg); border-right:2px solid #000; border-bottom:2px solid #000; background:#fff; }
-.chat-bubble-stack.is-below::after { bottom:auto; top:-8px; transform:translateX(-50%) rotate(45deg); border:0; border-left:2px solid #000; border-top:2px solid #000; }
+.chat-bubble-stack::after { content:''; position:absolute; bottom:-7px; left:calc(50% + var(--tail-x)); width:13px; height:13px; transform:translateX(-50%) rotate(45deg); border-right:2px solid #000; border-bottom:2px solid #000; background:#fff; }
+.chat-bubble-stack.is-below::after { bottom:auto; top:-7px; transform:translateX(-50%) rotate(45deg); border:0; border-left:2px solid #000; border-top:2px solid #000; }
 @media (max-width:600px) { .chat-bubble-stack { max-width:min(160px, 43vw); } .chat-bubble { font-size:12px; padding:7px 9px; } }
 @media (prefers-reduced-motion:no-preference) { .chat-bubble { animation:chat-appear .16s ease-out both; } @keyframes chat-appear { from { opacity:0; transform:translateY(5px); } } }
 </style>

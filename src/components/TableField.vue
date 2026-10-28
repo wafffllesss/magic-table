@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { CardInstance } from '../domain/game';
 import { clampCardPosition } from '../domain/tableView';
 import CardPose from './CardPose.vue';
 import { useAppI18n } from '../i18n';
 
-defineProps<{ cards: CardInstance[]; seatId: string; selectedId: string; arrivingId?: string; dragId?: string; dragMoved?: boolean; reducedMotion: boolean; canAdjustCounters: boolean; spectator?: boolean }>();
+const props = defineProps<{ cards: CardInstance[]; seatId: string; selectedId: string; arrivingId?: string; dragId?: string; dragMoved?: boolean; reducedMotion: boolean; canAdjustCounters: boolean; spectator?: boolean }>();
 const { t } = useAppI18n();
 const emit = defineEmits<{
   (event: 'drag', pointer: PointerEvent, id: string): void;
@@ -13,9 +14,14 @@ const emit = defineEmits<{
   (event: 'tap', id: string): void;
   (event: 'counter', id: string, amount: number): void;
 }>();
-function position(card: CardInstance): Record<string, string> {
+const cardLayers = computed(() => new Map(
+  props.cards.map((card, index) => ({ card, index, y: clampCardPosition(card.x, card.y, card.tapped).y }))
+    .sort((a, b) => a.y - b.y || a.index - b.index)
+    .map(({ card }, index) => [card.id, index + 1]),
+));
+function position(card: CardInstance): Record<string, string | number> {
   const point = clampCardPosition(card.x, card.y, card.tapped);
-  return { left: point.x + '%', top: point.y + '%' };
+  return { left: point.x + '%', top: point.y + '%', zIndex: cardLayers.value.get(card.id) ?? 1 };
 }
 function plusCounters(card: CardInstance): number { return card.counters['+1/+1'] ?? 0; }
 function auxiliaryClick(event: MouseEvent, id: string): void {
@@ -55,6 +61,8 @@ function activateCard(event: MouseEvent, id: string): void {
 </template>
 
 <style scoped>
+.board-card-wrap { pointer-events: none; }
+.board-card-wrap > .card-pose, .board-card-wrap > .counter-badge { pointer-events: auto; }
 .card-counter-controls {
   position: absolute;
   z-index: 12;

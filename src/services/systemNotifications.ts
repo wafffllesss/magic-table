@@ -1,3 +1,4 @@
+import type { ChatMessage } from '../domain/chat';
 import type { RoomSnapshot } from './firebaseRoom';
 import { indicatedSeat } from '../domain/tableInteraction';
 
@@ -51,6 +52,13 @@ export class RoomNotificationTracker {
     this.connected = stable;
     return events;
   }
+}
+
+export function chatNotification(message: ChatMessage, room: RoomSnapshot, enabled: boolean): { name?: string; body: string } | undefined {
+  if (!enabled || !room.selfUid || message.uid === room.selfUid) return;
+  const participant = Object.values(room.seats).find(person => person?.uid === message.uid);
+  const seat = room.state?.seats.find(person => person.participantUid === message.uid);
+  return { name: participant?.name ?? seat?.name, body: message.text };
 }
 
 export function showSystemNotification(title: string, body: string): void {

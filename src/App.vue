@@ -10,11 +10,14 @@ import CardInspection from './components/CardInspection.vue';
 import AppCursor from './components/AppCursor.vue';
 import ChatComposer from './components/ChatComposer.vue';
 import AgentPromptDialog from './components/AgentPromptDialog.vue';
+import ChangelogDialog from './components/ChangelogDialog.vue';
+import { changelogs, changelogVersions, compareVersions, shouldShowChangelog, type ChangelogNotes } from './services/changelog';
 import { visibleChat, type ChatMessage } from './domain/chat';
 import { TARGET_DURATION, targetReferenceValid, validTargetIntent, type TargetIntent, type TargetMark } from './domain/tableTargets';
 import meuMagicLogo from './assets/meu-magic-logo.svg';
 import type { DeckDefinition, GameAction, MatchState } from './domain/game';
-import { applyAction } from './domain/game';
+import { applyAction, newMatch } from './domain/game';
+import { soloTurnSeat, soloTurnKey } from './domain/solo';
 import { MatchHistory, restoreHistorySnapshot } from './domain/history';
 import { localRepository } from './services/storage';
 import { TABLE_SEATS, type ReplacementOffer, type RoomSnapshot, type TableSeatId } from './services/firebaseRoom';
@@ -27,12 +30,12 @@ import type { HandPresence, HandPresenceInput } from './domain/tablePresence';
 import type { HandRevealRequest, HandRevealView } from './domain/handReveal';
 import { roomBackend, type JoinedRoom } from './services/roomBackend';
 import { peerRoom } from './services/peerRoom';
-import { RoomNotificationTracker, showSystemNotification } from './services/systemNotifications';
+import { RoomNotificationTracker, chatNotification, showSystemNotification } from './services/systemNotifications';
 import { mcpAgents } from './services/mcpAgents';
 import { validateDeck } from './domain/deck';
 import { errorMessageKey, initialPreference, initializeLocale, normalizePreference, useAppI18n, type LanguagePreference } from './i18n';
 
-type Page = 'home' | 'rooms' | 'lobby' | 'workshop' | 'table';
+type Page = 'home' | 'rooms' | 'lobby' | 'solo' | 'solo-choice' | 'workshop' | 'table';
 const page = ref<Page>('home');
 const name = ref('');
 const nameDraft = ref('');
@@ -43,14 +46,23 @@ const splashReady = ref(false);
 let startupSkipped = false;
 const splashIncomplete = ref(false);
 const splashProgress = ref<{ phase: 'cards' | 'images'; loaded: number; total: number }>({ phase: 'cards', loaded: 0, total: 0 });
-const availableUpdate = ref<{ currentVersion: string; version: string; url: string } | null>(null);
+const availableUpdate = ref<{ currentVersion: string; version: string; url: string; notes?: ChangelogNotes } | null>(null);
 const startupController = new AbortController();
 function continueStartup(): void {
   if (!splashReady.value) { startupSkipped = true; startupController.abort(); }
   else splashVisible.value = false;
 }
-async function openUpdate(): Promise<void> {
-  try { await window.meuMagicDesktop?.openUpdate(); } catch { /* The player can continue and retry on the next launch. */ }
+const changelogMode = ref<'automatic' | 'history' | 'update'>();
+const historyVersion = computed(() => changelogVersions.find(version => compareVersions(version, appVersion) <= 0));
+function openUpdate(): void { if (availableUpdate.value) changelogMode.value = 'update'; }
+function openHistory(): void { if (historyVersion.value) changelogMode.value = 'history'; }
+async function closeChangelog(): Promise<void> {
+  const automatic = changelogMode.value === 'automatic';
+  changelogMode.value = undefined;
+  if (automatic) await localRepository.setPreference('changelog-seen-version', appVersion);
+}
+async function downloadUpdate(): Promise<void> {
+  try { await window.meuMagicDesktop?.openUpdate(); } catch { /* The player can retry. */ }
 }
 const languagePreference = ref<LanguagePreference>(initialPreference);
 const { t } = useAppI18n();
@@ -139,6 +151,69 @@ const chatNow = ref(Date.now());
 const activeChat = computed(() => visibleChat(chatMessages.value, chatNow.value));
 const room = ref<RoomSnapshot>({ seats: {}, queue: [], online: false });
 const onlineMode = ref(false);
+const soloMode = ref(false);
+const soloDecks = ref<Partial<Record<TableSeatId, DeckDefinition>>>({});
+const soloPlaymats = ref<Partial<Record<TableSeatId, string>>>({});
+const soloEditingSeat = ref<TableSeatId>();
+type SavedSolo = { version: 1; state: MatchState; seatId: TableSeatId; playmats: Partial<Record<TableSeatId, string>> };
+const savedSolo = ref<SavedSolo>();
+let soloSaveQueue: Promise<void> = Promise.resolve();
+function validSoloSave(value: SavedSolo | undefined): value is SavedSolo {
+  return value?.version === 1 && !!value.state && Array.isArray(value.state.seats) && value.state.seats.length >= 2 && value.state.seats.length <= 4
+    && !!value.state.cards && Array.isArray(value.state.stack) && Array.isArray(value.state.passes) && Array.isArray(value.state.log)
+    && value.state.seats.some(seat => seat.id === value.seatId) && TABLE_SEATS.includes(value.seatId);
+}
+function saveSolo(): Promise<void> {
+  if (!soloMode.value || !state.value || !room.value.selfSeatId) return soloSaveQueue;
+  const snapshot = JSON.parse(JSON.stringify({ version: 1, state: state.value, seatId: room.value.selfSeatId, playmats: soloPlaymats.value })) as SavedSolo;
+  savedSolo.value = snapshot;
+  soloSaveQueue = soloSaveQueue.then(() => localRepository.setPreference('solo-match', snapshot));
+  return soloSaveQueue;
+}
+const soloCount = computed(() => Object.values(soloDecks.value).filter(Boolean).length);
+async function openSolo(): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    await soloSaveQueue;
+    const saved = await localRepository.getPreference<SavedSolo>('solo-match');
+    savedSolo.value = validSoloSave(saved) ? saved : undefined;
+    if (savedSolo.value) page.value = 'solo-choice'; else newSolo();
+  } finally { busy.value = false; }
+}
+function newSolo(): void { soloMode.value = true; soloDecks.value = {}; soloPlaymats.value = {}; page.value = 'solo'; }
+function resumeSolo(): void {
+  const saved = savedSolo.value;
+  if (!validSoloSave(saved)) return;
+  soloMode.value = true; onlineMode.value = false; soloPlaymats.value = saved.playmats ?? {};
+  state.value = saved.state; resetHistory();
+  room.value = { seats: {}, queue: [], online: false, selfSeatId: saved.seatId, state: saved.state, gameReady: true };
+  page.value = 'table';
+}
+async function editSoloSeat(id: TableSeatId): Promise<void> { soloEditingSeat.value = id; await openWorkshop('solo'); }
+function setSoloSeat(id: TableSeatId): void {
+  if (!soloMode.value || busy.value || !state.value?.seats.some(seat => seat.id === id && seat.status === 'playing')) return;
+  clearTargets(); room.value = { ...room.value, selfSeatId: id };
+  void saveSolo();
+}
+function followSoloTransition(before: MatchState, after: MatchState): void {
+  if (!soloMode.value || (soloTurnKey(before) === soloTurnKey(after) && after.seats.some(seat => seat.id === room.value.selfSeatId && seat.status === 'playing'))) return;
+  const next = soloTurnSeat(after);
+  if (next) { clearTargets(); room.value = { ...room.value, selfSeatId: next as TableSeatId }; }
+}
+async function startSolo(): Promise<void> {
+  const entries = TABLE_SEATS.flatMap(seatId => { const deck = soloDecks.value[seatId]; return deck && deckIsValid(deck) ? [{ seatId, name: deck.name, deck: deckSnapshot(deck) }] : []; });
+  if (entries.length < 2 || entries.length !== soloCount.value) return;
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const next = newMatch(entries, Date.now()); state.value = next; resetHistory();
+    room.value = { seats: {}, queue: [], online: false, selfSeatId: soloTurnSeat(next) as TableSeatId, state: next, gameReady: true };
+    await saveSolo();
+    page.value = 'table';
+  } catch (error) { notifyError(error); }
+  finally { busy.value = false; }
+}
 const notificationTracker = new RoomNotificationTracker();
 const notificationPermission = ref(window.meuMagicDesktop ? 'granted' : typeof Notification === 'undefined' ? 'unsupported' : Notification.permission);
 const notificationsEnabled = ref(true);
@@ -161,6 +236,7 @@ const busy = ref(false);
 const history = new MatchHistory();
 const preferredPlaymat = ref<string>();
 const customPlaymatsDisabled = ref(false);
+const playmatColorsDisabled = ref(false);
 const feedbackEvent = ref<{ key: string; params?: Record<string, string | number>; raw?: boolean }>();
 const feedback = computed(() => feedbackEvent.value ? feedbackEvent.value.raw ? feedbackEvent.value.key : t(feedbackEvent.value.key, feedbackEvent.value.params ?? {}) : '');
 const fatalError = ref('');
@@ -184,7 +260,7 @@ const selfSeatId = computed(() => room.value.selfSeatId as TableSeatId | undefin
 const mySeat = computed(() => selfSeatId.value ? room.value.seats[selfSeatId.value] : undefined);
 const isReady = computed(() => mySeat.value?.ready === true);
 const playmatIds = computed(() => Object.fromEntries(TABLE_SEATS.flatMap(id => {
-  const choice = validPlaymatId(onlineMode.value ? room.value.seats[id]?.playmatId : id === selfSeatId.value ? preferredPlaymat.value : undefined);
+  const choice = validPlaymatId(soloMode.value ? soloPlaymats.value[id] : onlineMode.value ? room.value.seats[id]?.playmatId : id === selfSeatId.value ? preferredPlaymat.value : undefined);
   return choice ? [[id, choice]] : [];
 })) as Partial<Record<TableSeatId, string>>);
 let offerTicker: ReturnType<typeof setInterval> | undefined;
@@ -230,11 +306,14 @@ onMounted(async () => {
   selectedDeck.value = localDecks.value.find(deck => deck.id === deckId && deckIsValid(deck));
   preferredPlaymat.value = validPlaymatId(await localRepository.getPreference<string>('playmat-id'));
   customPlaymatsDisabled.value = (await localRepository.getPreference<boolean>('disable-custom-playmats')) === true;
+  playmatColorsDisabled.value = (await localRepository.getPreference<boolean>('disable-playmat-colors')) === true;
   notificationsEnabled.value = (await localRepository.getPreference<boolean>('notifications-enabled')) !== false;
   languagePreference.value = normalizePreference(await localRepository.getPreference('language-preference'));
   languagePreference.value = initializeLocale(languagePreference.value, navigator.languages?.length ? navigator.languages : [navigator.language]);
+  const seenChangelog = await localRepository.getPreference<string>('changelog-seen-version');
   initialized.value = true;
   splashReady.value = true;
+  if (shouldShowChangelog(appVersion, seenChangelog, changelogs)) changelogMode.value = 'automatic';
   if (!availableUpdate.value && (!splashIncomplete.value || startupSkipped)) splashVisible.value = false;
   if (name.value.length >= 2) {
     if (selectedDeck.value) page.value = 'rooms';
@@ -344,6 +423,7 @@ async function enterRoom(joined: JoinedRoom): Promise<void> {
     deckSyncFailed.value = false;
     // A returning ready player may still be waiting for the running match snapshot.
     if (!connected.state && !joined.member.ready && joined.member.role === 'player' && selectedDeck.value) await syncSelectedDeck();
+    if (!connected.state) await roomBackend.setPlaymat(preferredPlaymat.value);
     localDecks.value = await getLibraryDecks();
     if (joined.hostUid === roomBackend.uid && window.meuMagicDesktop) {
       try { mcpAgents.activate(); mcpEndpoint.value = await window.meuMagicDesktop.startMcpServer(); mcpError.value = ''; }
@@ -376,6 +456,10 @@ async function chooseDeck(deck: DeckDefinition): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
+    if (workshopReturn.value === 'solo' && soloEditingSeat.value) {
+      soloDecks.value = { ...soloDecks.value, [soloEditingSeat.value]: deckSnapshot(deck) };
+      localDecks.value = await getLibraryDecks(); page.value = 'solo'; return;
+    }
     if (onlineMode.value) await peerRoom.saveDeck(deckSnapshot(deck));
     deckSyncFailed.value = false;
     selectedDeck.value = deck;
@@ -423,10 +507,10 @@ async function performActions(actions: GameAction[]): Promise<void> {
       const next = onlineMode.value ? visibleTableState(await peerRoom.act(action))! : applyAction(before, actorSeatId, action);
       state.value = next;
       history.record(withoutTemporaryHandReveals(before), withoutTemporaryHandReveals(toRaw(next)));
-      if (!onlineMode.value) room.value = { ...room.value, state: next };
+      if (!onlineMode.value) { room.value = { ...room.value, state: next }; followSoloTransition(before, next); }
     }
   } catch (error) { notifyError(error); }
-  finally { busy.value = false; }
+  finally { if (soloMode.value) await saveSolo(); busy.value = false; }
 }
 async function continueWithout(seatId: string): Promise<void> {
   if (!onlineMode.value || busy.value) return;
@@ -448,7 +532,18 @@ async function restoreHistory(redo: boolean): Promise<void> {
     if (onlineMode.value) state.value = await peerRoom.restoreHistoryState(snapshot, current.revision, redo ? 'REDO' : 'UNDO');
     else state.value = restoreHistorySnapshot(snapshot, current, seatId, redo ? 'REDO' : 'UNDO', `history-${crypto.randomUUID()}`);
     history.restored(redo, state.value.revision);
-    if (!onlineMode.value) room.value = { ...room.value, state: state.value };
+    if (!onlineMode.value) { room.value = { ...room.value, state: state.value }; followSoloTransition(current, state.value); }
+  } catch (error) { notifyError(error); }
+  finally { if (soloMode.value) await saveSolo(); busy.value = false; }
+}
+async function applyPreferredPlaymat(id: string | undefined): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const choice = validPlaymatId(id);
+    await localRepository.setPreference('playmat-id', choice ?? null);
+    preferredPlaymat.value = choice;
+    notify(choice ? 'app.playmatApplied' : 'app.playmatReset');
   } catch (error) { notifyError(error); }
   finally { busy.value = false; }
 }
@@ -456,6 +551,12 @@ async function applyPlaymat(id: string | undefined): Promise<void> {
   if (busy.value || !selfSeatId.value) return;
   busy.value = true;
   try {
+    if (soloMode.value) {
+      soloPlaymats.value = { ...soloPlaymats.value, [selfSeatId.value]: validPlaymatId(id) };
+      await saveSolo();
+      notify(id ? 'app.playmatApplied' : 'app.playmatReset');
+      return;
+    }
     if (onlineMode.value) await peerRoom.setPlaymat(id);
     await localRepository.setPreference('playmat-id', id ?? null);
     preferredPlaymat.value = id;
@@ -463,6 +564,11 @@ async function applyPlaymat(id: string | undefined): Promise<void> {
   } catch (error) { notifyError(error); }
   finally { busy.value = false; }
 }
+async function setPlaymatColorsDisabled(disabled: boolean): Promise<void> {
+  playmatColorsDisabled.value = disabled;
+  await localRepository.setPreference('disable-playmat-colors', disabled);
+}
+
 async function setCustomPlaymatsDisabled(disabled: boolean): Promise<void> {
   customPlaymatsDisabled.value = disabled;
   await localRepository.setPreference('disable-custom-playmats', disabled);
@@ -485,8 +591,9 @@ async function respondToOffer(accept: boolean): Promise<void> {
 }
 async function leaveRoom(): Promise<void> {
   notificationTracker.reset();
+  await soloSaveQueue;
   if (onlineMode.value) await shutdownRoom().catch(notifyError);
-  resetHistory(); onlineMode.value = false; activeRoomCode.value = ''; state.value = undefined; handPresence.value = []; chatMessages.value = []; room.value = { seats: {}, queue: [], online: false }; deckSyncFailed.value = false; page.value = 'rooms';
+  resetHistory(); onlineMode.value = false; soloMode.value = false; soloDecks.value = {}; soloPlaymats.value = {}; activeRoomCode.value = ''; state.value = undefined; handPresence.value = []; chatMessages.value = []; room.value = { seats: {}, queue: [], online: false }; deckSyncFailed.value = false; page.value = 'rooms';
 }
 async function shutdownRoom(): Promise<void> {
   await window.meuMagicDesktop?.stopMcpServer().catch(() => {});
@@ -528,23 +635,35 @@ function publishHandPresence(presence: HandPresenceInput): void {
     </section>
   </main>
   <main v-else-if="!initialized" class="entry-shell" aria-busy="true"><header class="entry-header"><span class="table-brand"><img class="brand-logo" :src="meuMagicLogo" alt="" aria-hidden="true"/><span>{{ t('app.name') }}</span></span><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage"/></header><p role="status">{{ t('common.loading') }}</p></main>
-  <RoomBrowser v-else-if="page === 'rooms'" :player-name="name" :deck-name="selectedDeck?.name ?? ''" :invite-code="inviteCode" :busy="loading || busy" :demo-progress="loading ? starterProgress : undefined" @entered="enterRoom" @edit-name="editName" @edit-deck="openWorkshop('rooms')" @demo="startDemo">
+  <RoomBrowser v-else-if="page === 'rooms'" :player-name="name" :playmat-id="preferredPlaymat" :custom-playmats-disabled="customPlaymatsDisabled" :playmat-colors-disabled="playmatColorsDisabled" :deck="selectedDeck" :invite-code="inviteCode" :busy="loading || busy" :demo-progress="loading ? starterProgress : undefined" @entered="enterRoom" @edit-name="editName" @edit-deck="openWorkshop('rooms')" @set-playmat="applyPreferredPlaymat" @demo="startDemo" @solo="openSolo">
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </RoomBrowser>
-  <DeckWorkshop v-else-if="page === 'workshop'" selection :decks="localDecks" :selected-deck-id="selectedDeck?.id" :busy="busy" :loading="libraryLoading" :loading-progress="starterProgress" :online="onlineMode && room.online" :notice="localizedWorkshopNotice" @choose="chooseDeck" @refresh="loadStarters" @updated="deckUpdated" @close="closeWorkshop">
+  <DeckWorkshop v-else-if="page === 'workshop'" selection :decks="localDecks" :selected-deck-id="workshopReturn === 'solo' && soloEditingSeat ? soloDecks[soloEditingSeat]?.id : selectedDeck?.id" :busy="busy" :loading="libraryLoading" :loading-progress="starterProgress" :online="onlineMode && room.online" :notice="localizedWorkshopNotice" @choose="chooseDeck" @refresh="loadStarters" @updated="deckUpdated" @close="closeWorkshop">
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </DeckWorkshop>
 
-  <GameTable v-else-if="page === 'table' && state" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :notifications-enabled="notificationsEnabled" :notification-permission="notificationPermission" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :hand-reveals="handReveals" :hand-reveal-prompt="handRevealPrompt" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @set-notifications-enabled="setNotificationsEnabled" @hand-presence="publishHandPresence" @target="sendTarget" @request-hand-reveal="requestHandReveal" @respond-hand-reveal="respondHandReveal" @end-hand-reveal="endHandReveal" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
+  <GameTable v-else-if="page === 'table' && state" :solo="soloMode" @select-solo-seat="setSoloSeat" :state="state" :seat-id="selfSeatId" :app-version="appVersion" :update-available="Boolean(availableUpdate)" :playmat-ids="playmatIds" :custom-playmats-disabled="customPlaymatsDisabled" :playmat-colors-disabled="playmatColorsDisabled" :notifications-enabled="notificationsEnabled" :notification-permission="notificationPermission" :online="onlineMode && room.online" :multiplayer="onlineMode" :room-code="activeRoomCode" :online-seats="room.seats" :hand-presence="handPresence" :chat-messages="activeChat" :target-marks="targetMarks" :hand-reveals="handReveals" :hand-reveal-prompt="handRevealPrompt" :spectator="!selfSeatId" :busy="busy" :is-host="onlineMode && room.hostUid === roomBackend.uid" @open-update="openUpdate" @open-changelog="openHistory" @actions="performActions" @undo="undoLastAction" @redo="redoLastAction" @set-playmat="applyPlaymat" @set-custom-playmats-disabled="setCustomPlaymatsDisabled" @set-playmat-colors-disabled="setPlaymatColorsDisabled" @set-notifications-enabled="setNotificationsEnabled" @hand-presence="publishHandPresence" @target="sendTarget" @request-hand-reveal="requestHandReveal" @respond-hand-reveal="respondHandReveal" @end-hand-reveal="endHandReveal" @continue-without="continueWithout" @copy-room-code="copyRoomCode" @leave="leaveRoom">
     <template #header-actions><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage" /></template>
   </GameTable>
+
+  <main v-else-if="page === 'solo-choice'" class="lobby-shell solo-lobby">
+    <header class="lobby-header"><button class="table-brand" @click="page = 'rooms'"><img class="brand-logo" :src="meuMagicLogo" alt=""/><span>{{ t('app.name') }}</span></button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage"/></header>
+    <section class="solo-content"><span class="eyebrow">{{ t('solo.local') }}</span><h1>{{ t('solo.savedTitle') }}</h1><p>{{ t('solo.savedDescription') }}</p><div class="solo-choice-actions"><button class="button button-primary" @click="resumeSolo">{{ t('solo.resume') }}</button><button class="button button-secondary" @click="newSolo">{{ t('solo.newGame') }}</button><button class="button button-ghost" @click="page = 'rooms'">{{ t('common.back') }}</button></div></section>
+  </main>
+  <main v-else-if="page === 'solo'" class="lobby-shell solo-lobby">
+    <header class="lobby-header"><button class="table-brand" @click="leaveRoom"><img class="brand-logo" :src="meuMagicLogo" alt=""/><span>{{ t('app.name') }}</span></button><div class="lobby-header-actions"><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage"/><button class="button button-ghost button-small" @click="leaveRoom">{{ t('common.back') }}</button></div></header>
+    <section class="solo-content"><span class="eyebrow">{{ t('solo.local') }}</span><h1>{{ t('solo.title') }}</h1><p>{{ t('solo.description') }}</p>
+      <div class="solo-seats"><article v-for="(id, index) in TABLE_SEATS" :key="id" class="solo-seat"><span class="eyebrow">{{ t('solo.seat', { number: index + 1 }) }}</span><strong>{{ soloDecks[id]?.name ?? t('solo.empty') }}</strong><div><button class="button button-secondary button-small" @click="editSoloSeat(id)">{{ soloDecks[id] ? t('solo.change') : t('solo.choose') }}</button><button v-if="soloDecks[id]" class="button button-ghost button-small" :aria-label="t('solo.removeSeat', { number: index + 1 })" @click="delete soloDecks[id]">{{ t('solo.remove') }}</button></div></article></div>
+      <p>{{ t('solo.minimum') }}</p><button class="button button-primary" :disabled="busy || soloCount < 2 || Object.values(soloDecks).some(deck => deck && !deckIsValid(deck))" @click="startSolo">{{ t('solo.start') }} ↗</button>
+    </section>
+  </main>
 
   <main v-else-if="page === 'lobby'" class="lobby-shell">
     <header class="lobby-header"><button class="table-brand" :aria-label="t('app.name')" @click="leaveRoom"><img class="brand-logo" :src="meuMagicLogo" alt="" aria-hidden="true"/><span>{{ t('app.name') }}</span></button><button v-if="activeRoomCode" class="room-code-badge" @click="copyRoomCode"><span>{{ t('lobby.inviteCode') }}</span><strong>{{ activeRoomCode }}</strong><small>{{ t('lobby.copyCode') }}</small></button><div class="lobby-header-actions"><span class="connection-badge" :title="room.transport === 'firebase' ? t('app.firebaseRelay') : room.transport === 'mixed' ? t('app.mixedTransport') : t('app.webrtc')"><i :class="room.online ? 'is-live' : ''"></i>{{ room.online ? t('app.connected') : t('app.reconnecting') }}<small v-if="room.transport === 'firebase'">· {{ t('app.firebaseRelay') }}</small><small v-else-if="room.transport === 'mixed'">· {{ t('app.mixedTransport') }}</small><small v-else-if="room.transport === 'p2p'">· {{ t('app.webrtc') }}</small></span><button v-if="showNotificationButton" class="button button-ghost button-small" @click="enableNotifications">{{ t('notifications.enable') }}</button><LanguageSelector v-model="languagePreference" @update:model-value="changeLanguage"/><button class="button button-ghost button-small" @click="leaveRoom">{{ t('app.leaveRoom') }} ↗</button></div></header>
     <section class="lobby-content"><div class="lobby-intro"><div><span class="eyebrow">{{ t('lobby.beforeTurn') }} · {{ t('table.gameTable').toUpperCase() }} · 4</span><h1>{{ t('lobby.heading') }}<br><em>{{ t('lobby.subheading') }}</em></h1><p>{{ selfSeatId ? t('lobby.chooseDeckDescription') : room.queuePosition ? t('lobby.waitingPosition', { position: room.queuePosition }) : t('lobby.watching') }}</p></div><div class="room-seal"><span>♛</span><small>COMMANDER<br>40 · 100 · 4</small></div></div>
       <div v-if="onlineMode" class="lobby-connections" role="status" aria-live="polite"><span v-for="peer in room.connectionPeers" :key="peer.uid">{{ t('app.connectionWith', { name: peer.name, route: t(`app.connectionRoutes.${peer.route}`) }) }}</span><span v-if="!room.connectionPeers?.length">{{ t(room.hostUid === room.selfUid ? 'app.connectionWaiting' : 'app.connectionChecking') }}</span></div>
       <div class="lobby-layout">
-        <LobbyTable :room="room" :chat-messages="activeChat" />
+        <LobbyTable :custom-playmats-disabled="customPlaymatsDisabled" :playmat-colors-disabled="playmatColorsDisabled" :room="room" :chat-messages="activeChat" />
         <aside class="lobby-setup"><span class="eyebrow">{{ selfSeatId ? t('lobby.beforeTurn') : t('lobby.watchRoom') }}</span><h2>{{ selfSeatId ? t('lobby.prepareSeat') : t('lobby.followTable') }}</h2><p class="lobby-setup-description">{{ selfSeatId ? t('lobby.readyDescription') : t('lobby.queueDescription') }}</p>
       <div class="lobby-bottom"><div class="your-place-card"><div class="place-icon">{{ selfSeatId ? '♛' : '⌛' }}</div><div><strong>{{ selfSeatId ? t('lobby.greeting', { name: mySeat?.name ?? name }) : t('lobby.waitingQueue') }}</strong><small>{{ selfSeatId ? (mySeat?.deckName ? t('lobby.deckReady') : t('lobby.chooseDeckPrompt')) : room.queuePosition ? t('lobby.queueWatching', { position: room.queuePosition }) : t('lobby.offerWaiting') }}</small></div></div><p v-if="deckSyncFailed" role="alert">{{ t('errors.unknown') }} <button class="button button-secondary" :disabled="busy" @click="syncSelectedDeck">{{ t('common.retry') }}</button></p><div class="lobby-actions"><button class="button button-secondary" @click="openWorkshop('lobby')">{{ selectedDeck || mySeat?.deckName ? t('lobby.changeDeck') : t('lobby.chooseDeck') }} <span aria-hidden="true">↗</span></button><button v-if="selfSeatId" class="button button-primary" :disabled="busy || deckSyncFailed || !mySeat?.deckName" @click="toggleReady">{{ isReady ? t('lobby.ready') : t('lobby.confirmSeat') }} <span aria-hidden="true">↗</span></button><button v-else class="button button-secondary" @click="openWorkshop('lobby')">{{ t('lobby.prepareDeck') }} <span aria-hidden="true">↗</span></button></div></div><p class="lobby-footnote"><span>✳</span> {{ t('lobby.offerNote') }}</p>
         <div v-if="mcpEndpoint || mcpError" class="mcp-endpoint" aria-label="Servidor MCP">
@@ -570,8 +689,13 @@ function publishHandPresence(presence: HandPresenceInput): void {
       <button v-if="editingName" class="button button-ghost" type="button" @click="editingName=false; page='rooms'">{{ t('common.cancel') }}</button>
     </form>
   </main>
+  <footer v-if="splashVisible || !initialized || page !== 'table' || !state" class="app-footer">
+    <span>Developed by <a href="https://github.com/wafffllesss/" target="_blank" rel="noopener noreferrer">Henrique Pauli</a></span>
+    <span class="app-footer-version"><button type="button" :disabled="!historyVersion" @click="openHistory">{{ t('table.appVersion', { version: appVersion }) }}</button> <button v-if="availableUpdate" type="button" @click="openUpdate">{{ t('table.updateApp') }}</button></span>
+  </footer>
   <p v-if="storageWarning" class="storage-warning" role="status">{{ t('app.storageWarning') }}</p>
   <div v-if="feedback" class="toast-message" :class="fatalError?'is-error':''" role="status"><span>{{ fatalError ? '!' : '✳' }}</span>{{ feedback }}<button :aria-label="t('common.close')" @click="feedbackEvent=undefined;fatalError=''">×</button></div>
+  <ChangelogDialog v-if="changelogMode" :version="changelogMode === 'update' ? availableUpdate!.version : changelogMode === 'automatic' ? appVersion : historyVersion!" :update="changelogMode === 'update'" :notes="availableUpdate?.notes" :url="availableUpdate?.url" @close="closeChangelog" @download="downloadUpdate" />
   <CardInspection />
   <ChatComposer :active="onlineMode && (page === 'lobby' || page === 'table')" :can-send="Boolean(selfSeatId && room.online)" @send="sendChat" />
   <AppCursor :player-name="name || t('app.name')" />
@@ -595,4 +719,8 @@ function publishHandPresence(presence: HandPresenceInput): void {
 .lobby-invite > span { display:flex; flex-direction:column; gap:4px; }
 .lobby-invite small { color:#9aaa91; font:8px var(--mono); letter-spacing:.1em; }
 .lobby-invite strong { color:var(--lime); font:600 19px var(--mono); letter-spacing:.12em; }
+</style>
+
+<style scoped>
+.solo-lobby { overflow-y:auto; } .solo-content { width:min(900px,calc(100% - 40px)); margin:40px auto; } .solo-content h1 { font:500 clamp(32px,4vw,48px) var(--heading); margin:12px 0; } .solo-content p { color:#9aa79e; line-height:1.6; } .solo-seats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:28px 0; } .solo-seat { min-height:140px; padding:20px; border:1px solid #c5ddc626; border-radius:12px; background:#152018; display:flex; flex-direction:column; align-items:flex-start; gap:14px; } .solo-seat strong { overflow-wrap:anywhere; flex:1; } .solo-choice-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:24px; } .solo-seat > div { display:flex; flex-wrap:wrap; gap:8px; } @media(max-width:600px) { .solo-seats { grid-template-columns:1fr; } .solo-content { margin:24px auto; } }
 </style>

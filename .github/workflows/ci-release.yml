@@ -40,23 +40,10 @@ jobs:
       - run: pnpm test:firebase
       - run: pnpm build
 
-  functions:
-    name: Functions build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: '22'
-      - run: npm ci
-        working-directory: functions
-      - run: npm run build
-        working-directory: functions
-
   package:
     name: Package Windows portable
     if: github.event_name == 'push'
-    needs: [checks, functions]
+    needs: checks
     runs-on: windows-latest
     timeout-minutes: 40
     outputs:
@@ -100,9 +87,16 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: node -e "const fs=require('fs'); const p=require('./package.json'); p.version=process.env.RELEASE_VERSION; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n')"
+      - name: Validate changelog files
+        if: steps.version.outputs.complete != 'true'
+        run: node scripts/validate-changelogs.mjs ${{ steps.version.outputs.version }}
       - name: Build portable executable
         if: steps.version.outputs.complete != 'true'
         run: pnpm desktop:make
+      - name: Include release notes
+        if: steps.version.outputs.complete != 'true'
+        shell: pwsh
+        run: Copy-Item "changelogs/${{ steps.version.outputs.version }}.*.md" out/portable/
       - name: Generate checksum
         if: steps.version.outputs.complete != 'true'
         shell: pwsh
@@ -119,6 +113,7 @@ jobs:
           path: |
             out/portable/MeuMagic-${{ steps.version.outputs.version }}-x64.exe
             out/portable/SHA256SUMS.txt
+            out/portable/*.md
           if-no-files-found: error
 
   publish:
@@ -142,6 +137,8 @@ jobs:
         run: |
           set -euo pipefail
           (cd release && sha256sum --check SHA256SUMS.txt)
+          test -s "release/${RELEASE_TAG#v}.en.md"
+          test -s "release/${RELEASE_TAG#v}.pt-BR.md"
           if ! gh release view "$RELEASE_TAG" --json isDraft > release-state.json 2>/dev/null; then
             gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --draft --generate-notes --title "$RELEASE_TAG"
           else

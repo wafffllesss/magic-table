@@ -17,7 +17,9 @@ VITE_FIREBASE_APP_ID=demo-app
 VITE_FIREBASE_EMULATOR_HOST=127.0.0.1
 ```
 
-The emulator host is enabled only in development builds. For Functions, install and build in `functions/` with Node 22 (`npm ci && npm run build`), then run `pnpm exec firebase emulators:start --only auth,database,functions --project demo-magic-table` from the project root instead of `pnpm emulator:p2p`.
+The emulator host is enabled only in development builds.
+
+To test the TURN relay with a real Firebase project and a deployed Worker, set `VITE_FORCE_TURN=true` in `.env.local` and restart the Vite dev server. This forces WebRTC to use relay candidates in development only; Firebase fallback may still be selected if the relay fails. Check that the connection indicator says TURN relay and exercise game actions between two participants. Remove the setting and restart Vite after testing. Both participants must be able to reach the same Firebase project, and emulator identities cannot authenticate with the deployed Worker.
 
 Database rules restrict writes to authenticated members, protect seats and limit rooms to four players and eight spectators. Clients update their own data and presence; the host controls the phase and seats for the next match. Signaling and fallback messages are limited to a participant and the host; recipients remove processed messages and stale messages expire after 60 seconds.
 

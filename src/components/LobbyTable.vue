@@ -4,11 +4,12 @@ import { useAppI18n } from '../i18n';
 import { MAT_HEIGHT, MAT_WIDTH, SEAT_PLACEMENT, TABLE_SIZE } from '../domain/tableView';
 import { TABLE_SEATS, type RoomSnapshot, type TableSeatId } from '../services/firebaseRoom';
 import PlaymatArt from './PlaymatArt.vue';
+import { playmatColor, validPlaymatId } from '../services/playmats';
 import CommanderThumbnails from './CommanderThumbnails.vue';
 import ChatBubbles from './ChatBubbles.vue';
 import type { ChatMessage } from '../domain/chat';
 
-const props = defineProps<{ room: RoomSnapshot; chatMessages?: ChatMessage[] }>();
+const props = defineProps<{ customPlaymatsDisabled?: boolean; playmatColorsDisabled?: boolean; room: RoomSnapshot; chatMessages?: ChatMessage[] }>();
 const { t } = useAppI18n();
 const seats = computed(() => TABLE_SEATS.map(id => ({ id, player: props.room.seats[id] })));
 const occupied = computed(() => seats.value.filter(seat => seat.player).length);
@@ -33,7 +34,7 @@ function seatStyle(id: TableSeatId): Record<string, string> {
     <div class="lobby-board">
       <div class="lobby-seat-layout">
         <article v-for="(item, index) in seats" :key="item.id" class="lobby-seat" :class="{ 'seat-self': item.id === room.selfSeatId, 'seat-ready': item.player?.ready, 'seat-empty': !item.player, 'seat-side': Math.abs(SEAT_PLACEMENT[item.id].angle) === 90 }" :style="seatStyle(item.id)" :data-seat="item.id" :aria-label="`${t('lobbyBoard.seat')} ${index + 1}${item.id === room.selfSeatId ? `, ${t('lobbyBoard.yourSeat')}` : ''}: ${item.player?.name ?? t('lobbyBoard.available')}`">
-          <PlaymatArt v-if="item.player?.playmatId" class="lobby-playmat-art" :id="item.player.playmatId" />
+          <PlaymatArt v-if="validPlaymatId(item.player?.playmatId) && (playmatColor(item.player?.playmatId) ? !playmatColorsDisabled : !customPlaymatsDisabled)" class="lobby-playmat-art" :id="item.player?.playmatId" />
           <div class="seat-index">{{ t('lobbyBoard.seat') }} {{ String(index + 1).padStart(2, '0') }} <span v-if="item.id === room.selfSeatId">· {{ t('lobbyBoard.you') }}</span></div>
           <div v-if="item.player" class="seat-player">
             <CommanderThumbnails v-if="item.player.deckSummary?.length" :entries="item.player.deckSummary" />

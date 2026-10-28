@@ -305,7 +305,8 @@ export class PeerTransport extends EventTarget {
   }
 
   private createPeerLink(uid: string, linkId: string): PeerLink {
-    const pc = new RTCPeerConnection({ iceServers: this.iceServers, iceCandidatePoolSize: 2 });
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers, iceCandidatePoolSize: 2,
+      iceTransportPolicy: import.meta.env.DEV && import.meta.env.VITE_FORCE_TURN === 'true' ? 'relay' : 'all' });
     const link: PeerLink = { peerUid: uid, linkId, pc, assembler: new RoomPacketAssembler(), pendingCandidates: [], remoteReady: false, sequence: 0, incomingSequence: 0, signalQueue: Promise.resolve(), sendQueue: Promise.resolve(), queuedBytes: 0, seenIds: new Set() };
     this.peers.set(uid, link);
     pc.onicecandidate = event => {

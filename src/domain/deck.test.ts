@@ -27,8 +27,10 @@ describe('Commander deck tools', () => {
     expect(deck.entries.find(entry => entry.name === 'Plains')?.quantity).toBe(35);
   });
 
-  it('rejects incorrect totals and requires unknown imports to be resolved', () => {
-    expect(() => parseDeckText('Commander:\n1 A New Commander\n\nDeck:\n35 Plains')).toThrow(/exatamente 100/);
+  it('parses incomplete lists and reports their total during validation', () => {
+    const incomplete = parseDeckText('Commander:\n1 A New Commander\n\nDeck:\n35 Plains');
+    expect(totalCards(incomplete)).toBe(36);
+    expect(validateDeck(incomplete, new Map())).toContain('Commander exige 100 cartas; o deck tem 36.');
     const deck = parseDeckText(`Commander:\n1 A New Commander\n\nDeck:\n35 Plains\n${Array.from({ length: 64 }, (_, i) => `1 Unique ${i}`).join('\n')}`);
     expect(validateDeck(deck, new Map())).toContain('Resolva todas as cartas de comandante pela biblioteca do Scryfall.');
   });
