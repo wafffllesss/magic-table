@@ -11,7 +11,7 @@ describe('changelog', () => {
     expect(shouldShowChangelog('0.0.6', undefined, changelogs)).toBe(true);
     expect(shouldShowChangelog('0.0.6', '0.0.5', changelogs)).toBe(true);
     expect(shouldShowChangelog('0.0.6', '0.0.6', changelogs)).toBe(false);
-    expect(shouldShowChangelog('0.0.7', '0.0.6', changelogs)).toBe(false);
+    expect(shouldShowChangelog('0.0.7', '0.0.6', {})).toBe(false);
   });
   it('keeps untrusted markup as plain text', () => {
     expect(parseChangelog('# Features\n- <img src=x onerror=alert(1)>')).toEqual([

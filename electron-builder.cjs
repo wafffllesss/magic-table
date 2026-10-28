@@ -15,14 +15,10 @@ module.exports = {
   extraResources: [{ from: 'out/legal', to: 'legal' }],
   npmRebuild: false,
   win: {
+    artifactName: 'MeuMagic-${version}-${arch}.zip',
     executableName: 'meu-magic',
     icon: 'electron/meu-magic.ico',
-    target: [{ target: 'portable', arch: ['x64'] }],
-  },
-  portable: {
-    artifactName: 'MeuMagic-${version}-${arch}.exe',
-    requestExecutionLevel: 'user',
-    // Concurrent launches must not overwrite each other's extracted runtime.
-    unpackDirName: false,
+    // Ship the runtime directly, without an NSIS self-extracting launcher.
+    target: [{ target: 'zip', arch: ['x64'] }],
   },
 };

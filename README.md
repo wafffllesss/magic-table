@@ -6,15 +6,15 @@ The project is **source available for noncommercial use** under the [PolyForm No
 
 ## Windows portable app
 
-Once releases are available, download `MeuMagic-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/wafffllesss/magic-table/releases). The portable app runs on Windows x64 without installing Node.js or pnpm. It is unsigned and has no automatic updater. Close the old app and replace the executable to update.
+Once releases are available, download `MeuMagic-<version>-x64.zip` and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/wafffllesss/magic-table/releases). Extract the entire ZIP into a folder and run `meu-magic.exe` there. The portable app runs on Windows x64 without installing Node.js or pnpm. It is unsigned and has no automatic updater. Close the old app and extract updates into a new folder; keep all runtime files together.
 
-The app stores decks, preferences, Firebase identity and cache in `%APPDATA%/meu-magic`; these are not included in the executable. On the first launch after the rename, it copies the previous `%APPDATA%/mana-table` profile and imports its IndexedDB data. Close the old version before the first launch; the old profile is retained. The packaged app uses the separate `app://meu-magic` origin.
+The app stores decks, preferences, Firebase identity and cache in `%APPDATA%/meu-magic`; these are not included in the ZIP. On the first launch after the rename, it copies the previous `%APPDATA%/mana-table` profile and imports its IndexedDB data. Close the old version before the first launch; the old profile is retained. The packaged app uses the separate `app://meu-magic` origin.
 
 Choose **Join with code** to enter a multiplayer room. The portable app does not register a `meumagic://` Windows protocol. Multiplayer requires the configured Firebase services and internet access. Scryfall searches and images not already cached also require internet. The app can use cached cards and images offline once loaded, but does not install a service worker to make the web app available offline.
 
 ## Run locally
 
-Requirements: Node.js 24, pnpm 11.22.0, and Java 21 or newer for Firebase emulator tests. Functions are built with Node.js 22. On Windows, `pnpm desktop:make` builds the portable executable.
+Requirements: Node.js 24, pnpm 11.22.0, and Java 21 or newer for Firebase emulator tests. Functions are built with Node.js 22. On Windows, `pnpm desktop:make` builds the portable ZIP archive.
 
 ```sh
 corepack enable
@@ -60,6 +60,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md
 
 The bundled Wizards-derived playmats require a rights review before this repository or its builds are made public. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-The desktop app checks GitHub for a newer stable release at startup and prepares the starter and local decks, caching card data and small front images. The first preparation may take longer; it can be skipped, and missing cards and images can be loaded later. If an update is available, its release page opens in the browser; close the old app and replace the portable executable manually.
+The desktop app checks GitHub for a newer stable release at startup and prepares the starter and local decks, caching card data and small front images. The first preparation may take longer; it can be skipped, and missing cards and images can be loaded later. If an update is available, its release page opens in the browser; close the old app and extract the new ZIP into a separate folder, then run its `meu-magic.exe`.
 
 Release notes are stored in `changelogs/<version>.en.md` and `changelogs/<version>.pt-BR.md`. Each file must include `# Features` and `# Fixes and adjustments`. Keep at most ten versions; the release workflow validates and attaches both files for the selected version. The app shows the notes once per version and makes its available history accessible from the version indicator.
