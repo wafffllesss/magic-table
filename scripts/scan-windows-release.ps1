@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $artifact = (Get-Item -LiteralPath $Path).FullName
-if ([IO.Path]::GetExtension($artifact) -ne '.zip') { throw 'Expected a Windows release ZIP.' }
+if ([IO.Path]::GetExtension($artifact) -ne '.exe') { throw 'Expected a Windows portable release executable.' }
 
 $platformRoot = Join-Path $env:ProgramData 'Microsoft/Windows Defender/Platform'
 $scanner = Get-ChildItem -LiteralPath $platformRoot -Directory -ErrorAction SilentlyContinue |
