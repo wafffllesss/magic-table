@@ -48,7 +48,7 @@
     "typescript": "5.9.3",
     "vite": "^8.3.4",
     "vitest": "5.0.4",
-    "vue-tsc": "3.2.5",
+    "vue-tsc": "3.3.14",
     "wrangler": "^4.153.0"
   },
   "license": "PolyForm-Noncommercial-1.0.0",
